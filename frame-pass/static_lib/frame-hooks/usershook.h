@@ -1,0 +1,1704 @@
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+//#include "./hooks.h"
+#include "./framertypes.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <inttypes.h>
+#include <stddef.h>
+#include <errno.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <math.h>
+#include <string.h>
+#include <assert.h>
+#include <stdbool.h>
+#include <signal.h>
+//#include <smmintrin.h>
+
+#ifndef USERSHOOK_H_
+#define USERSHOOK_H_
+
+#define DEBUG
+#ifdef DEBUG
+#  define dbg(x) x
+#else
+#  define dbg(x) 
+#endif
+
+//#define ASSERT_DEBUG
+#ifdef ASSERT_DEBUG
+#  define assert_dbg(x) x
+#else
+#  define assert_dbg(x) 
+#endif
+
+
+//%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+//%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+//#define inlining hooks in the loop (check Framer's loopopt pass)
+#define FULL_INLINING
+
+#define STORE_ONLY_CHECK
+
+#define DISABLE_CHECKS_AT_GEP
+
+#define REPLACE_ASSERT_WITH_IF  
+
+// better enable above all the time..otherwise 
+//function body of hooks are optimized away..:(
+
+#define MEASURE_RUNTIME
+
+// for bitcast, planning to skip tracking arrays
+// for some experiments. (like typesan)
+#define ENABLE_TRACK_ARRAYS
+
+    // disable exit. replacing exit with asm("nop")  
+//#define EXIT_AT_MEM_ERROR
+
+//%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+//%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+ 
+//%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+//%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+// disabling operation done at _alloca.
+//  skipping tagging and updating metadata. (so all ptrs are untagged) 
+//
+//#define DISABLE_GLOBAL_METADATA_UPDATE
+//#define DISABLE_ALLOCA_METADATA_UPDATE
+#define DISABLE_CHECK_BOUNDS
+
+#define ENABLE_TYPECAST_CHECK 
+//
+//%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+//%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+//#define DISABLE_HEAP_METADATA_UPDATE //--> is this used?
+
+dbg(
+extern unsigned FRAMER_tempGVcount;
+extern unsigned FRAMER_tempstorecount;
+extern unsigned FRAMER_temploadcount;
+
+extern unsigned FRAMER_Ntempload   ;
+extern unsigned FRAMER_Ntempstore  ;
+extern unsigned FRAMER_Ntempmem    ;
+extern unsigned FRAMER_Ntempset     ;
+extern unsigned FRAMER_Ntempstrncat ;
+extern unsigned FRAMER_Ntempstrcpy  ;
+extern unsigned FRAMER_Ntempstrcmp  ;
+extern unsigned FRAMER_Ntempstrncpy ;
+extern unsigned FRAMER_Ntempmemcmp  ;
+extern unsigned FRAMER_Ntempmemchr  ;
+)
+
+//int untagcount;
+//extern const bool FRAMER_is_bigframe;
+//extern const bool FRAMER_is_smallframe;
+
+//extern const unsigned FRAMER_TyIDStart;
+
+/* slot size = 2^15, but slot table is at every 2^16!! */
+/*extern const uintptr_t FRAMER_log_slotsize;
+extern const uintptr_t FRAMER_num_used_bits_in_ptr;
+extern const uintptr_t FRAMER_slot_size;
+extern const uintptr_t FRAMER_log_slottable_interval;
+*/
+
+//extern const uintptr_t FRAMER_slot_base_mask;
+//extern const uintptr_t FRAMER_header_slot_base_mask;
+
+
+//extern const uintptr_t FRAMER_mask_tag_out;
+//extern const uintptr_t FRAMER_flagmask 0x8000000000000000 //(1ULL<<63) 
+//extern const uintptr_t FRAMER_mask_only_flag_out;
+
+
+/* bounds check status */
+//extern const int FRAMER_is_inbound;
+//extern const int FRAMER_is_outofbound;
+
+/* for BASICType Table*/
+//extern const unsigned FRAMER_llvm_BasicTyCount;
+//extern const unsigned FRAMER_extra_BasicTyCount;
+//extern const unsigned FRAMER_total_BasicTyCount;
+//extern int FRAMER_BasicTy_table [FRAMER_llvm_BasicTyCount 
+//                        + FRAMER_extra_BasicTyCount]; 
+extern int FRAMER_BasicTy_table [22]; 
+
+/* for Type table */
+extern unsigned         FRAMER_structTy_count; 
+extern StructEntryT*    FRAMER_baseOfStructTable;
+extern SafeCastEntryT*  FRAMER_baseOfSafeCastTable;
+extern unsigned         FRAMER_safecast_col_num;
+extern unsigned         FRAMER_safecast_row_num;
+// old one upto here.
+extern void * FRAMER_baseOf_OffsetTable;
+extern short FRAMER_total_offset_count;
+extern short FRAMER_max_ty_count_per_off;
+extern short FRAMER_max_offset_val;
+
+/* for Metadata table */
+extern int FRAMER_fd;
+extern int errno;
+
+extern uintptr_t FRAMER_metatable_count;
+
+extern uintptr_t FRAMER_metadata_file_size;
+
+/* TABLES */
+// HERE, StructTy ARRAY is inserted by llvm! 
+extern HeaderT* FRAMER_PointerTy_Table; 
+#ifdef ENABLE_TYPECAST_CHECK
+  extern EntryT* FRAMER_TABLE;
+#else
+  extern SlotT* FRAMER_TABLE;
+#endif
+
+//TYPE HASH TABLE
+//extern GHashTable *hash;
+
+// to resolve problem!!
+extern char **environ ; 
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static void FRAMER_supplementary_exit()
+{
+//    printf("Out-of-bounds. Exiting\n");
+#ifndef MEASURE_RUNTIME
+    exit(0);
+#else
+    asm("nop");
+#endif
+}
+
+__attribute__((__used__))
+//__attribute__((always_inline))
+static unsigned FRAMER_decide_log_framesize (void * p, 
+                                                        unsigned objsize)
+{
+    /// framesize only for stack and heap, that are not padded by one byte///
+    /// (globals are padded by one byte unlike stack/heap obj) ///
+
+    assert_dbg(assert( (((uintptr_t)p <= FRAMER_end_addr_userspace) 
+            && ((uintptr_t)(p + (objsize-1))) < FRAMER_end_addr_userspace)
+            && "object is out of bound of FRAMER_end_addr_userspace!\n");)
+
+    assert( ((uintptr_t)p <= FRAMER_end_addr_userspace) 
+            && ((uintptr_t)((char*)p + (objsize-1))) < FRAMER_end_addr_userspace);
+
+    uintptr_t xor_result= ((uintptr_t)p) ^ ((uintptr_t)((char*)p+objsize));
+    int myclzl = __builtin_clzl ((unsigned long)xor_result); //TODO: safe cast? 
+    unsigned N = (unsigned)(64 - myclzl);
+    
+    return N; 
+}
+/*
+__attribute__((__used__))
+//__attribute__((always_inline))
+static bool FRAMER_supplementary_isStructTy (unsigned id)
+{
+    bool is_struct;
+    if (id >=FRAMER_total_BasicTyCount 
+        && id < FRAMER_total_BasicTyCount+FRAMER_structTy_count ) {
+        is_struct=true; 
+    }
+    else{
+        is_struct=false;
+    }
+    return is_struct;
+}*/
+
+__attribute__((__used__))
+//__attribute__((always_inline))
+static bool FRAMER_is_N_tagged (uintptr_t tag) //not TyIDtagged!
+{
+    /* add assertion that flag  must be 0.*/
+    bool isN= false;
+    if((tag>>FRAMER_num_used_bits_in_ptr) < FRAMER_TyIDStart) {
+        isN= true;
+    }
+    return isN;
+}
+
+#ifdef TYPECHECK
+__attribute__((__used__))
+static bool 
+FRAMER_is_N_tagged_2 (uintptr_t tag) //not TyIDtagged!
+{
+    /* add assertion that flag  must be 0.*/
+    bool isN= false;
+    if(tag<FRAMER_TyIDStart) {
+        isN= true;
+    }
+    return isN;
+}
+#endif
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static uintptr_t 
+FRAMER_supplementary_get_table_index (uintptr_t slotbase) 
+{
+    uintptr_t shadow_index = 
+        ((slotbase - FRAMER_slotbase_of_userspace_start)
+        /(1ULL<<FRAMER_log_slottable_interval));
+    return shadow_index; 
+}
+
+__attribute__((__used__))
+//__attribute__((always_inline))
+static bool FRAMER_update_entry (
+        EntryT* ptr, 
+        void* padded_obj_base) 
+{
+    bool entry_available= 1;
+    EntryT m = *ptr;
+
+    if (m.base !=0) {
+        entry_available= 0;
+    }
+    else {
+        ptr->base= (void*)padded_obj_base; //save the address of header now!
+    }
+    
+    return entry_available; 
+}
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static uintptr_t FRAMER_supplementary_get_slotbase_from_untag (uintptr_t p, 
+                                                        unsigned N)//uintptr_t N) 
+{
+    uintptr_t slotbase = p & ((~0)<<N);
+    assert_dbg(assert(N<64 && "check the result if correct..\n");)
+    return slotbase;   
+}
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static EntryT* 
+FRAMER_get_entry_addr (uintptr_t p, 
+                       unsigned N)
+{ 
+    //p:untagged ptr
+   
+    //starting from getting a slot base;
+    uintptr_t slotbase= 
+        FRAMER_supplementary_get_slotbase_from_untag (p, N);
+    // get slot index. 
+    uintptr_t shadow_index= 
+        FRAMER_supplementary_get_table_index(slotbase); 
+    //get a pointer 
+ 
+ 
+   /* EntryT* M= FRAMER_TABLE + shadow_index*FRAMER_num_of_entries_per_slot; 
+    EntryT* myentry= M+(N-FRAMER_log_slottable_interval); 
+    
+    dbg(printf("\tslot base:\t%p\n", 
+        (void*)slotbase);)
+    dbg(printf("\tM:\t%p, @entry:%p\nCHECK entry addr is correct!",
+        M, myentry);)
+    dbg(exit(0);) 
+   */ 
+   
+    SlotT* M= FRAMER_TABLE + shadow_index; 
+    EntryT* m= M->slotarray;
+    EntryT* myentry= m+(N-FRAMER_log_slottable_interval); 
+    
+    dbg(printf("\tslot base:\t%p,\tsizeof(slotT):%lu\n", 
+        (void*)slotbase, sizeof(SlotT)));
+    dbg(printf("\tM:\t%p",M));
+    dbg(printf("\tm:\t%p, @entry:%p\n",
+        m,m+(N-FRAMER_log_slottable_interval)));
+  
+//////////////     
+
+
+    return myentry; 
+}
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static bool 
+FRAMER_update_table (void* padded_obj_base, 
+                     unsigned N)
+{
+    if(N<=15 && N>64){
+        dbg(printf("Wrong N at updating table. fat_base: %p, N: %u\n", 
+                    padded_obj_base,N);)
+      #ifndef MEASURE_RUNTIME        
+        exit(0);
+      #else
+        asm("nop");
+      #endif
+    }
+    
+    EntryT* m= FRAMER_get_entry_addr((uintptr_t)padded_obj_base, N);
+       
+    // getting a pointer to the entry up to here. 
+    return FRAMER_update_entry (m, 
+                                padded_obj_base); 
+}
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static void 
+FRAMER_update_header (void* padded_obj_base, //untagged 
+                      unsigned FramerTypeID,
+                      unsigned raw_object_size
+                    #ifdef ENABLE_TYPECAST_CHECK
+                      ,unsigned numBytesPerElem
+                    #endif
+                      )
+{
+    HeaderT * h =   (HeaderT*)padded_obj_base; 
+
+    h->FramerTyID=  FramerTypeID;
+    h->size =       raw_object_size;
+  
+  #ifdef ENABLE_TYPECAST_CHECK
+  
+    h->elemsize= numBytesPerElem;
+  
+  #endif
+
+    dbg(printf("\tupdate HEADER @:\t%p\n", h));
+    dbg(printf("\tRAW_SIZE:\t%d\n",h->size));
+    dbg(printf("\tFramerTyID:\t%d\n",h->FramerTyID));
+}
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static uintptr_t FRAMER_supplementary_cal_offset (void * p)
+{
+    return (((uintptr_t)p) & 0x7FFF);  
+}
+
+/* returns the base of RAW object (after header) */
+__attribute__((__used__))
+//__attribute__((always_inline))
+static void* 
+FRAMER_supplementary_tag_ptr (void * p, 
+                              uintptr_t tag, 
+                              bool flag)
+{
+    uintptr_t flgvec;
+    if (flag==FRAMER_is_bigframe) {
+        flgvec=0; 
+    }
+    else{
+        flgvec = ((uintptr_t)1)<<63;
+    }
+    uintptr_t tagvec = tag<<48; 
+    uintptr_t taggedPtr = (flgvec | tagvec) | (uintptr_t)p; 
+     
+    /*printf("\tTagging..\n");
+    printf("\torig:\t%p\n", p);
+    printf("\tflag:\t%p\n", (void*)flgvec);
+    printf("\ttag:\t%p\n", (void*)tagvec);
+    printf("\ttagged_p:\t%p\n", (void*)taggedPtr);
+*/
+    return (void*)taggedPtr;
+}
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static bool FRAMER_supplementary_extract_flag (void* p)
+{
+    return ((uintptr_t)p)>>63; 
+}
+
+/*
+__attribute__((__used__))
+//__attribute__((always_inline))
+static HeaderT* FRAMER_supplementary_retrieve_from_header(uintptr_t p, 
+                                                    uintptr_t tagvec)
+{
+    // Actually.. not retrieve from header, but get header address
+    uintptr_t slotbase= p & FRAMER_header_slot_base_mask; 
+    
+    uintptr_t offset= (tagvec & FRAMER_mask_only_flag_out)>>FRAMER_num_used_bits_in_ptr; 
+    HeaderT* hd_p = (HeaderT*)(slotbase + offset);
+     
+    return hd_p;      
+}
+*/
+
+__attribute__((__used__))
+__attribute__((always_inline))
+//__attribute__((optnone))
+static HeaderT* 
+FRAMER_retrieve_from_header(uintptr_t p, 
+                            uintptr_t offset) //tag shifted & flag out
+{
+    // Actually.. not retrieve from header, but get header address
+    uintptr_t slotbase= p & FRAMER_header_slot_base_mask; 
+    
+    //uintptr_t offset= (tagvec & FRAMER_mask_only_flag_out)>>FRAMER_num_used_bits_in_ptr; 
+    HeaderT* hd_p = (HeaderT*)(slotbase + offset);
+     
+    return hd_p;      
+}
+
+
+__attribute__((__used__))
+//__attribute__((always_inline))
+static void FRAMER_empty_metadata_entry (uintptr_t untagged, 
+                                         uintptr_t tagvec)
+{
+    //get corresponding slot base.
+    assert_dbg(assert(tagvec!=0 && "tagvec is empty! exiting..\n");)
+    assert(tagvec!=0);
+    unsigned N= (unsigned)(tagvec>>FRAMER_num_used_bits_in_ptr);
+    if (N<=15 && N>64) {
+        dbg(printf("Wrong N at emptying entry. at: %p, N: %u\n", 
+                    (void*)untagged,N);)
+      #ifndef MEASURE_RUNTIME        
+        exit(0);
+      #else
+        asm("nop");
+      #endif
+    }
+    EntryT* m= FRAMER_get_entry_addr(untagged, N); 
+    memset (m, 0, sizeof(EntryT)); 
+}
+/*
+__attribute__((__used__))
+__attribute__((always_inline))
+//__attribute__((optnone))
+static EntryT* 
+FRAMER_supplementary_retrieve_from_table (uintptr_t p, uintptr_t tagvec)
+{
+    //get corresponding slot base.
+    unsigned N= (unsigned)(tagvec >>FRAMER_num_used_bits_in_ptr);
+    EntryT* m= FRAMER_get_entry_addr(p, N);
+
+    return m;
+}
+*/
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static EntryT* 
+FRAMER_retrieve_from_table (uintptr_t p, unsigned N)
+{
+    //get corresponding slot base.
+    EntryT* m= FRAMER_get_entry_addr(p, N);
+
+    return m;
+}
+
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static EntryT* FRAMER_supplementary_retrieve_from_table_inlining (uintptr_t p, uintptr_t tagvec)
+{
+    //get corresponding slot base.
+    unsigned N= (unsigned)(tagvec >>FRAMER_num_used_bits_in_ptr);
+    EntryT* m= FRAMER_get_entry_addr(p, N);
+
+    return m;
+}
+
+/*
+__attribute__((__used__))
+//__attribute__((always_inline))
+static int FRAMER_supplementary_check_bounds_only (uintptr_t p, 
+                                            uintptr_t p_end, //addr+sizeof(type) e.g.) *((int*)p)
+                                            char* base, 
+                                            int size)
+{
+    uintptr_t end = (uintptr_t)(base+size-1); // bound.
+    int status= FRAMER_is_outofbound;
+
+    if ((p >= (uintptr_t)base && p<=end)
+        && (p_end >= (uintptr_t)base && p_end<=end)){ //inbound
+        status= FRAMER_is_inbound; 
+    }
+    //else if (p==end){ // is off-by-one
+    //    status= FRAMER_is_outofframe; //out-of-bound       
+    //}
+    dbg(printf("base addr:\t%p, size: %d\n", base,size);
+        printf("p addr:\t%p\n", (void*)p);
+        printf("end addr:\t%p\n", (void*)end);
+        printf("p_end:\t%p\n", (void*)p_end);
+        )
+    dbg(printf("\tSTATUS:\t%d\n", status);)
+    return status; 
+}
+*/
+
+__attribute__((__used__))
+//__attribute__((always_inline))
+static uintptr_t 
+FRAMER_supplementary_check_inframe(uintptr_t p, //untagged 
+                                   uintptr_t gepbase, //untagged 
+                                   //uintptr_t logframesize)
+                                   unsigned logframesize)
+{
+    uintptr_t temp= (~0)<<logframesize; 
+    return (p^gepbase)&temp; 
+}
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static uintptr_t FRAMER_extract_tagvec (void* p)
+{
+    return ((uintptr_t)p) & FRAMER_mask_content_out;
+}
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static void* FRAMER_untag_ptr (void * p)
+{
+//    untagcount++;
+    return (void*)(((uintptr_t)p) & FRAMER_mask_tag_out); 
+}
+
+__attribute__((__used__))
+__attribute__((always_inline))
+//__attribute__((optnone))
+static void* 
+FRAMER_supplementary_compare_idx (unsigned size, size_t idx, void * ptr)
+{ //this size is num_elems of arrays or struct, not num_bytes
+    // compare
+   #ifdef REPLACE_ASSERT_WITH_IF
+    if (!(size>idx)) {
+        dbg(printf("f1\n");)
+      #ifndef MEASURE_RUNTIME
+        exit(0);
+      #else
+        asm("nop");
+      #endif
+    }
+   #else
+    assert(size>idx);
+   #endif
+    return FRAMER_untag_ptr (ptr);
+}
+
+__attribute__((__used__))
+__attribute__((always_inline))
+//__attribute__((optnone))
+static void* 
+FRAMER_supplementary_compare_size (size_t objsize, 
+                    size_t idx, unsigned tysize, 
+                    unsigned elemsize, void * ptr)
+{
+    // compare
+   #ifdef REPLACE_ASSERT_WITH_IF
+    //if (!(objsize>=(idx+1)*elemsize)) {printf("2\n");exit(0);}
+    if (!(objsize>=(idx*elemsize)+tysize)) {
+        dbg(printf("f2\n");)
+      #ifndef MEASURE_RUNTIME
+        exit(0);
+      #else        
+        asm("nop");
+      #endif
+    }
+   #else 
+    //assert(objsize>=(idx+1)*elemsize);
+    assert(objsize>=idx*elemsize+tysize); 
+   #endif
+    return FRAMER_untag_ptr (ptr);
+}
+
+__attribute__((__used__))
+__attribute__((always_inline))
+//__attribute__((optnone))
+static void* 
+FRAMER_supplementary_compare_type (size_t objsize, 
+                    unsigned optysize, void * ptr)
+{
+    // compare
+   #ifdef REPLACE_ASSERT_WITH_IF
+    if (!(optysize>=objsize)) {
+        dbg(printf("f3\n");)
+      #ifndef MEASURE_RUNTIME
+        exit(0);
+      #else
+        asm("nop");
+      #endif
+    }
+   #else
+    assert(optysize>=objsize);
+   #endif
+    return FRAMER_untag_ptr (ptr);
+}
+
+
+__attribute__((__used__))
+//__attribute__((always_inline))
+static unsigned FRAMER_supplementary_get_type_size (unsigned tid, unsigned numBytes)
+{ 
+    assert_dbg(assert(tid!=0 && "voidtype is deferefenced?\n");)
+    assert(tid!=0);
+    // FRAMER_BasicTy_table in bits 
+    // numBytes as 
+    unsigned tsize=0;
+    //do something 
+    if (tid== IntegerTyID){ //integerTy has multiple kinds of int types
+                            //so, we handle intty first.
+        //DOUTFUL. Framer pass is supposed to pass paddedTyID (basicID+int), and why add 6?
+        dbg(printf("not supposed to enter here. check. \n");)
+      #ifndef MEASURE_RUNTIME
+        exit(0);
+      #else
+        asm("nop");
+      #endif
+    }
+    else if (tid==VectorTyID) {
+        return numBytes; //size arg of store/load saved in *BYTES*
+    }
+    else if (tid < FRAMER_total_BasicTyCount) { //not int, but other basic type
+        tsize= FRAMER_BasicTy_table[tid]; //size of basictype saved in *BITS*
+    }
+    else {
+        unsigned sid= tid-FRAMER_total_BasicTyCount;
+        StructEntryT* sindex= FRAMER_baseOfStructTable + sid; //size of struct saved in *BITS* 
+        tsize= sindex->tysize;
+    }
+    //dbg(printf("\tTyID:\t%u,TypeSIZE:\t%u\n", tid, tsize)); 
+    assert_dbg(assert(tsize!=0 && "Size of type is 0! Exiting...\n");) 
+    assert(tsize!=0); 
+    dbg(if (tsize==0) {
+        printf("tsize is 0 or less than 8 bits!\n"); 
+        printf("tid: %u, numBytes: %u\n", tid, numBytes);
+        exit(0);
+    })
+    return tsize/8;
+}
+
+static unsigned FRAMER_supplementary_get_type_size_inlining (unsigned tid, unsigned numBytes)
+{ 
+    assert_dbg(assert(tid!=0 && "voidtype is deferefenced?\n");)
+    assert(tid!=0);
+    unsigned tsize=0;
+    //do something 
+    if (tid== IntegerTyID){ //integerTy has multiple kinds of int types
+                            //so, we handle intty first.
+        //DOUTFUL. Framer pass is supposed to pass paddedTyID (basicID+int), and why add 6?
+        dbg(printf("not supposed to enter here. check. \n");)
+      #ifndef MEASURE_RUNTIME
+        exit(0);
+      #else
+        asm("nop");
+      #endif
+        //tsize= FRAMER_BasicTy_table[tid+6]; 
+    }
+    else if (tid==VectorTyID) {
+        return numBytes; //size arg of store/load saved in *BYTES*
+    }
+    else if (tid < FRAMER_total_BasicTyCount) { //not int, but other basic type
+        tsize= FRAMER_BasicTy_table[tid]; //size of basictype saved in *BITS*
+    }
+    else {
+        unsigned sid= tid-FRAMER_total_BasicTyCount;
+        StructEntryT* sindex= FRAMER_baseOfStructTable + sid; //size of struct saved in *BITS* 
+        tsize= sindex->tysize;
+    }
+    //dbg(printf("\tTyID:\t%u,TypeSIZE:\t%u\n", tid, tsize)); 
+    assert_dbg(assert(tsize!=0 && "Size of type is 0! Exiting...\n");) 
+    assert(tsize!=0); 
+    dbg(if (tsize==0) {
+        printf("tsize is 0 or less than 8 bits!\n"); 
+        printf("tid: %u, numBytes: %u\n", tid, numBytes);
+        exit(0);
+    })
+    return tsize/8;
+}
+
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static uintptr_t 
+FRAMER_extract_tagval (void *p)
+{
+    return (uintptr_t)p>>FRAMER_num_used_bits_in_ptr;
+}
+
+
+__attribute__((__used__))
+//__attribute__((optnone))
+static void * FRAMER_check_mem_access_INSIDE (
+    unsigned tag,
+    uintptr_t untagged_p,
+    unsigned numBytesToAccess)
+{
+    bool flag= (bool)(tag>>15);  
+    tag= tag&(0x7FFF); // now flag out & shifted! use it as a val. 
+    
+    char* base= NULL;
+    int objsize= 0;
+    HeaderT* mptr= NULL;
+    
+    if (flag==FRAMER_is_smallframe) {
+        mptr= FRAMER_retrieve_from_header(untagged_p,tag); 
+            //tag still has flag //TODO
+    }
+  #ifdef TYPECHECK    
+    else if (flag==FRAMER_is_bigframe && FRAMER_is_N_tagged_2(tag)) { 
+            // big-framed object //TODO
+  #else 
+    else{
+  #endif
+        EntryT* m = FRAMER_retrieve_from_table (untagged_p, tag); //TODO
+        mptr= (HeaderT*)(m->base); 
+            //technically,not base but header!named in the old approach..
+    }
+  #ifdef TYPECHECK    
+    else { 
+        /// TypeID is tagged. (flag=big_frame && ID + FRAMER_TyIDStart(100)) //
+        // it's using spare bits of big-framed flagged tags 
+        ///do something later
+        return (void*)untagged_p;    
+    }
+  #endif
+    objsize = mptr->size;
+    base = (char*)mptr + sizeof(HeaderT);
+
+    dbg(printf("\t@hd:\t%p\n", mptr));
+    dbg(printf("\t@hd:\t%p\n", mptr));
+    dbg(printf("\tbase:\t%p\n", base));
+    
+        
+    assert_dbg(assert(((base!=NULL)&&(objsize!=0)) && 
+            "Retrieving metadata at store inst failed. \n");)
+    assert((base!=NULL)&&(objsize!=0)); 
+
+    uintptr_t end=  (uintptr_t)(base+objsize-1);
+    uintptr_t p_end= untagged_p + numBytesToAccess-1;
+    dbg(printf("\tend:\t%p\n", (void*)end);)
+    dbg(printf("\tp_end:\t%p\n", (void*)p_end);)
+    dbg(printf("\tptr:\t%p\n", (void*)untagged_p);)
+    
+   #ifdef REPLACE_ASSERT_WITH_IF
+    if(!(untagged_p>=(uintptr_t)base) || !(p_end <= end)) {
+        // printf("maybe called from strncmp\n");
+        // printf("\tstr:\t%s\n", (char*)untagged_p);
+      dbg(
+        printf("\tfatbase:\t%p\n", base);
+        printf("\tbytenum:\t%u\n", numBytesToAccess);
+        printf("\tsize:\t%d\n", objsize);
+        
+        printf("\tptr:\t%p\n", (void*)untagged_p);
+        printf("\tend:\t%p\n", (void*)end);
+        printf("\tp_end:\t%p\n", (void*)p_end);
+      )
+      #ifndef MEASURE_RUNTIME
+        exit(0);
+      #else
+        asm("nop");
+      #endif
+    }
+    //asm ("nop");
+   #else
+    assert((untagged_p>=(uintptr_t)base) && (p_end <= end)); 
+        /// this keeps being optimized away run on LNT, along with function body at opt -O2!!
+   #endif
+    
+    assert_dbg(assert(is_inbound==FRAMER_is_inbound && "out-of-bound\n");)
+    dbg(if (!(untagged_p>=(uintptr_t)base) || !(p_end <= end)){ 
+        printf("\nnumBytesToAccess: %d\n", numBytesToAccess);
+        printf("FRAMER ERROR: out-of-bound at mem access\n"
+                "\tAddr: %p.\n", (void*)untagged_p);
+    })
+    return (void*)untagged_p;
+}
+
+__attribute__((__used__))
+//__attribute__((always_inline))
+//__attribute__((optnone))
+static void * FRAMER_check_mem_access (
+    void * addr,
+    unsigned numBytesToAccess)
+{
+  #ifndef DISABLE_CHECK_BOUNDS 
+    uintptr_t untagged_p= (uintptr_t)FRAMER_untag_ptr(addr);
+    
+    // printf("tagged: %p\n",addr);
+    if (untagged_p==(uintptr_t)addr) {
+        return (void*)untagged_p;
+    }
+    if (numBytesToAccess==0) {
+        return (void*)untagged_p;   
+    }
+    unsigned tag= (unsigned)FRAMER_extract_tagval(addr); 
+    // NOW SHIFT DONE. having flag
+
+    asm("NOP");
+
+    return FRAMER_check_mem_access_INSIDE(tag,untagged_p,numBytesToAccess);
+
+  #else
+    
+    return FRAMER_untag_ptr(addr);
+  
+  #endif
+}
+
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static void * 
+FRAMER_check_mem_access_inlining (
+    void * addr,
+    unsigned numBytesToAccess)
+{
+#ifndef DISABLE_CHECK_BOUNDS 
+    uintptr_t untagged_p= (uintptr_t)FRAMER_untag_ptr(addr);
+    if (untagged_p==(uintptr_t)addr) {
+        return (void*)untagged_p;
+    }
+    if (numBytesToAccess==0) {
+        return (void*)untagged_p;   
+    }
+    unsigned tag= (unsigned)FRAMER_extract_tagval(addr); // NOW SHIFT DONE. having flag
+
+    bool flag= (bool)(tag>>15);  
+    tag= tag&(0x7FFF); // now flag out & shifted! use it as a val. 
+     
+    char* base= NULL;
+    int objsize= 0;
+    HeaderT* mptr= NULL;
+   
+    if (flag==FRAMER_is_smallframe) {
+        mptr= FRAMER_retrieve_from_header(untagged_p,tag); 
+    }
+  #ifdef TYPECHECK
+    else if (flag==FRAMER_is_bigframe && FRAMER_is_N_tagged_2(tag)) { 
+  #else
+//    else if (flag==FRAMER_is_bigframe) { 
+    else {
+  #endif
+        EntryT* m = FRAMER_retrieve_from_table (untagged_p, tag); 
+        mptr= (HeaderT*)(m->base); //technically,not base but header!named in the old approach..
+    }
+  #ifdef TYPECHECK
+    else { 
+        /// TypeID is tagged. (flag=big_frame && ID + FRAMER_TyIDStart(100)) //
+        // it's using spare bits of big-framed flagged tags 
+        ///do something later
+        return (void*)untagged_p;    
+    }
+  #endif
+    objsize = mptr->size;
+    base = (char*)mptr + sizeof(HeaderT);
+     
+    assert((base!=NULL)&&(objsize!=0)); 
+
+    uintptr_t end=  (uintptr_t)(base+objsize-1);
+    uintptr_t p_end= untagged_p + numBytesToAccess-1;
+
+   #ifdef REPLACE_ASSERT_WITH_IF    
+    if(!((untagged_p>=(uintptr_t)base) && (p_end <= end))) {
+        dbg(printf("Out of bound.inln.\n");)
+      #ifndef MEASURE_RUNTIME
+        exit(0); 
+      #else 
+        asm("nop"); 
+      #endif 
+     }
+   #else
+    assert((untagged_p>=(uintptr_t)base) && (p_end <= end)); //(1) 
+   #endif
+    
+    return (void*)untagged_p;
+#else // DISABLE_CHECK_BOUNDS
+    return FRAMER_untag_ptr(addr);
+#endif // DISABLE_CHECK_BOUNDS
+}
+
+dbg(
+__attribute__((__used__))
+//__attribute__((always_inline))
+static bool FRAMER_supplementary_isBigAddr (void *p)
+{
+    // if upper 16 bits are already used by userprogram, return true.
+    bool tagtaken=false;
+    //uintptr_t result= ((uintptr_t)p) & (~FRAMER_mask_tag_out); 
+    uintptr_t result= ((uintptr_t)p) & FRAMER_mask_content_out; 
+    if (result!=0) { // 
+        tagtaken=true; 
+    }
+    return tagtaken; 
+}
+)
+__attribute__((__used__))
+//__attribute__((always_inline))
+static void FRAMER_forall_global_variable (
+                                    void * taggedPtr, 
+                                    unsigned FramerTypeID,  
+                                    unsigned numElems, 
+                                    unsigned numBytesPerElem,
+                                    bool isConstant,
+                                    char ** gvTag) //holding the tag
+                                   // void* mybase, void* myend, //myend not used. delete?
+                                   // unsigned isPLtokenbuf)
+{
+#ifndef DISABLE_GLOBAL_METADATA_UPDATE
+    dbg(printf("\nHOOK Global Variable:: \n"));
+    dbg(printf("\ttaggedPtr:\t%p\n", taggedPtr));
+    dbg(printf("\tnumElems:%d\n", numElems));
+    dbg(printf("\tFramerTypeID:%u\n", FramerTypeID));
+    dbg(printf("\t*gvtag: %p\n", *gvTag);)
+    
+    *gvTag= (char*)taggedPtr;
+         
+    unsigned raw_obj_size= numElems * numBytesPerElem; 
+    unsigned padded_obj_size= raw_obj_size + sizeof(HeaderT) + 1; 
+
+    bool flag= FRAMER_supplementary_extract_flag (taggedPtr); 
+    uintptr_t tagvec= FRAMER_extract_tagvec (taggedPtr); 
+    char* untagged_p= (char*)FRAMER_untag_ptr(taggedPtr);
+
+    char* hd_addr = untagged_p - sizeof(HeaderT); 
+    assert_dbg(assert(tagvec!=0LL && "Global variable pointers are not tagged!\n");)
+    assert(tagvec!=0LL);
+   
+    unsigned N_or_offset= (unsigned)((tagvec & FRAMER_mask_only_flag_out)>>FRAMER_num_used_bits_in_ptr); 
+    /// p: hidden padded_obj_base. header inserted by pass.
+
+    //printf("\tObjectSize_Raw:\t%d\n\tPadded Objsize:\t%d\n", 
+    //        raw_obj_size, padded_obj_size);
+
+    // update metadata either in the table or obj header. 
+    
+    if (flag==FRAMER_is_smallframe) {
+        dbg(printf("\tSMALL FRAME\n"));
+    }
+    else if (flag==FRAMER_is_bigframe && FRAMER_is_N_tagged(tagvec)){ //flag==0
+        dbg(printf("\tBIG FRAME\n"));
+        
+        bool entry_available = 
+            FRAMER_update_table(hd_addr,N_or_offset);   
+        assert_dbg(assert (entry_available 
+                &&  "corresponding entry in the table is not 0!"
+                    "possibly overlapped allocation?\n");) 
+        assert (entry_available); 
+    }
+    else { //FramerTyID tagged.(sharing '0' flag with big-framed objects)
+        ;
+    }
+    if (!isConstant) {
+        FRAMER_update_header (hd_addr, 
+                FramerTypeID,
+                raw_obj_size,
+                numBytesPerElem);
+
+    } // Constant global's header is updated at compile time. 
+    //TODO: maybe header for ALL GLOBAL can be updated at compile time?
+#endif
+
+}
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static void* FRAMER_forall_alloca (char * thinBase, 
+                            unsigned numElems,
+                            unsigned FramerTypeID, 
+                            unsigned numBytesPerElem)
+                            //void* locationOfFramerTyEntry)
+{    
+#ifndef DISABLE_ALLOCA_METADATA_UPDATE
+    dbg(printf ("HOOK Alloca\n"));
+    dbg(printf("\tAddr Of Obj:\t%p\n", thinBase));
+    dbg(printf("\t#Elems:\t%d\n", numElems));
+    dbg(printf("\tTypeID:\t%d\n", FramerTypeID));
+
+  dbg(
+    if (FRAMER_supplementary_isBigAddr(thinBase)){
+        dbg(printf("ALLOCA isBigAddr: %p\n", thinBase);)
+        exit(0);
+    }
+  ) 
+    char* tagged_p= NULL;    
+    char* fatbase= thinBase - sizeof(HeaderT); //header address
+    
+    dbg(printf("\theader addr:\t%p\n", fatbase));
+    
+    unsigned raw_obj_size = numElems*numBytesPerElem;
+    unsigned padded_obj_size = sizeof(HeaderT)+raw_obj_size;
+    
+    //printf("\traw size:\t%d\n", raw_obj_size);
+    //printf("\tHeader addr:\t%p\n", p);
+
+    unsigned N= FRAMER_decide_log_framesize (fatbase, padded_obj_size);  
+    uintptr_t tag=0;
+    bool whichframe;
+
+    // update metadata in the obj header, but for big-framed obj, update entry also.(@header) 
+    if (N > FRAMER_log_slotsize) {
+        dbg(printf("\tbig frame\n"));
+
+        bool entry_available = 
+            FRAMER_update_table (fatbase, N);   
+        
+        assert_dbg(assert (entry_available 
+                && "corresponding entry in the table is not 0!"
+                "possibly overlapped allocation?\n");) 
+        assert (entry_available); 
+        
+        tag= (uintptr_t)N;
+        whichframe= FRAMER_is_bigframe;
+    }
+    else {
+        dbg(printf("\tsmall\n"));
+        
+        tag= FRAMER_supplementary_cal_offset(fatbase);
+        whichframe= FRAMER_is_smallframe; 
+    }
+    FRAMER_update_header (fatbase, 
+                          FramerTypeID,
+                          raw_obj_size,
+                          numBytesPerElem);
+    tagged_p = (char*)FRAMER_supplementary_tag_ptr(fatbase, 
+                                            tag, 
+                                            whichframe);     
+    
+    tagged_p= tagged_p + sizeof(HeaderT);
+
+    //dbg(printf("exiting alloca. tagged: %p\n", tagged_p));
+    return tagged_p;
+#else
+    return thinBase;
+#endif
+}
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static void FRAMER_forall_getelementptr (void * GEP, 
+                                    void * baseOfGEP) 
+{
+    return;
+#ifndef DISABLE_CHECKS_AT_GEP
+    unsigned tag= (unsigned)FRAMER_extract_tagval(GEP); // NOW SHIFT DONE. having flag
+    if (tag==0) {
+        return;
+    }
+    bool flag= (bool)(tag>>15);  
+    tag= tag&(0x7FFF); // now flag out & shifted! use it as a val. 
+ 
+    unsigned logframesize= FRAMER_log_slotsize;
+
+#ifdef TYPECHECK    
+    if (flag==FRAMER_is_bigframe && FRAMER_is_N_tagged_2(tag)){ //n>15
+#else    
+    if (flag==FRAMER_is_bigframe){ //n>15
+#endif
+       logframesize= tag;
+    }
+    /////////
+
+#ifdef TYPECHECK    
+    else if(flag==FRAMER_is_smallframe){
+        logframesize= FRAMER_log_slotsize;
+    }
+    else { //tag is just typeID (flag==is_bigframe)
+        return;
+    }
+#endif
+    uintptr_t is_inframe= FRAMER_supplementary_check_inframe((uintptr_t)GEP,//untagged_p, 
+                                                        (uintptr_t)baseOfGEP,//untagged_gepbase, 
+                                                        logframesize);
+    assert(is_inframe==0);
+#endif
+// end of DISABLE_CHECKS_AT_GEP
+}
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static void * FRAMER_forall_store_inlining ( 
+                        void * addr, //destAddress, 
+                        unsigned numBytesOfSrcTy)
+{
+    dbg(printf("store inln\n");)
+
+#ifdef FULL_INLINING 
+    
+    return FRAMER_check_mem_access_inlining(addr, numBytesOfSrcTy);
+
+#else 
+
+    return FRAMER_check_mem_access(addr, numBytesOfSrcTy);
+
+#endif
+}
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static void * FRAMER_forall_store ( 
+                        void * addr, 
+                        unsigned numBytesOfSrcTy)
+{
+    dbg(printf("STORE. %p, numBytes: %u\n", addr, numBytesOfSrcTy);)
+    return FRAMER_check_mem_access(addr, numBytesOfSrcTy);
+}
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static void * FRAMER_forall_load (void * addr, 
+                        //unsigned FramerTypeID, 
+                        unsigned numBytesOfLoadedContent)
+                         /// when we meet p_content = load <pointerty> p, 
+                         //  p must be pointer, and p_contenr may be or not.
+                         /// addrToBeloaded: p , resultTy: a type of p_content  
+{
+    return FRAMER_check_mem_access(addr, numBytesOfLoadedContent); 
+}
+
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static void * FRAMER_forall_load_inlining (void * addr, 
+                        unsigned numBytesOfLoadedContent)
+{
+#ifdef FULL_INLINING
+    return FRAMER_check_mem_access_inlining(addr, numBytesOfLoadedContent); 
+#else
+    return FRAMER_check_mem_access(addr, numBytesOfLoadedContent);
+#endif
+}
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static void * FRAMER_forall_call_llvm_memtransfer (
+
+    void * addr, 
+    uint64_t numBytesToCopy, 
+    unsigned numAlign, 
+    bool isVolatile )
+{
+  dbg(
+    printf("HOOK MEMTRANSFER\n");
+    printf("\taddr:\t%p\n", addr);
+  )
+  return FRAMER_check_mem_access (
+        addr, numBytesToCopy); 
+}
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static void * FRAMER_forall_call_llvm_memset(void * addr,
+                                    signed char val,
+                                    uint64_t numBytesToCopy, 
+                                    unsigned numAlign, 
+                                    bool isVolatile )
+{
+    dbg(printf("HOOK MEM SET \n"));
+    assert_dbg(assert(numAlign <= 16 
+               && "FRAMER assumes memset alignment is <=16!\n")); 
+     
+    return FRAMER_check_mem_access (
+            addr, numBytesToCopy); 
+}
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static uint64_t
+FRAMER_createTKey (uint64_t offset, 
+                   short objtyid,
+                   unsigned divider)
+{
+    return (objtyid * divider) + offset;       
+}
+
+static void *
+FRAMER_get_tyentry (short objTyid,
+                    unsigned maxoffsperty, 
+                    unsigned tblentrysize) 
+{
+    return FRAMER_baseOf_OffsetTable + 
+           (maxoffsperty*tblentrysize)*objTyid;    
+}
+
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static HeaderT * 
+FRAMER_get_header_addr (uint64_t untagged_p,
+                        unsigned tag)
+{
+    bool flag= (bool)(tag>>15);  
+    tag= tag&(0x7FFF); // now flag out & shifted! use it as a val. 
+    
+    char* base= NULL;
+    HeaderT* mptr= NULL;
+    
+    if (flag==FRAMER_is_smallframe) {
+        mptr= FRAMER_retrieve_from_header(untagged_p,tag); 
+        // tag still has flag 
+    }
+ 
+  #ifdef TYPECHECK    
+
+    else if (flag==FRAMER_is_bigframe && FRAMER_is_N_tagged_2(tag)) { 
+
+  #else 
+
+    else {
+
+  #endif
+        EntryT* m= FRAMER_retrieve_from_table (untagged_p, tag); //TODO
+        mptr= (HeaderT*)(m->base); 
+        //technically,not base but header!named in the old approach..
+    }
+    return mptr;
+}
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static bool
+FRAMER_check_safecast (short offset, 
+                       short destyid,
+                       short objTyid, 
+                       unsigned maxtysperoff,
+                       unsigned maxoffsperty,
+                       unsigned tblentrysize) 
+{
+//  uint64_t tKey= FRAMER_createTKey (offset, objTyid, divider);
+   
+  dbg(
+    printf("\t* max tys per off:\t%d\n", maxtysperoff);
+    printf("\t* max offs per ty:\t%d\n", maxoffsperty);
+    printf("\t* tbl entry size:\t%d\n", tblentrysize);
+    printf("\t * FRAMER_baseOf_OffsetTable:\t%p\n", FRAMER_baseOf_OffsetTable);
+  
+  )
+
+  short* initptr= (short*)FRAMER_get_tyentry(objTyid,
+                                maxoffsperty,
+                                tblentrysize); 
+  dbg(
+    printf("\t* offset?:\t%d\n", *initptr);
+  ) 
+  assert(initptr!=NULL);
+   
+  for (short i=0; i< maxoffsperty; i++) {
+    
+    short * ptr= initptr+ (tblentrysize/2)*i; 
+        //divided by 2, since ptr is short* type. 
+    
+    printf ("\t* *ptr val:\t%d, offset is %d \n",
+            *ptr, offset);
+   
+    if (offset > *ptr) {
+        continue;
+    }
+    else if (offset < *ptr) {
+        return false; 
+    }
+    
+    ptr++; //move to the array of tids
+     
+    for (short j=0;j< maxtysperoff;j++){ 
+      
+      short tid= *ptr;
+      printf("  * tyid: %d\n", tid); 
+      
+      if (tid== -1) {
+        return false;
+      }
+      if (tid == destyid) {
+          printf("  ---> SAFE CAST\n");
+          return true;
+      }
+      ptr++;
+
+    }
+  }
+  return false;
+}
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static uint64_t 
+FRAMER_get_elembase (uintptr_t ptr, //untagged
+                     uint64_t base,
+                     unsigned elemsize,
+                     unsigned objsize)
+{
+    if (elemsize==objsize) {
+        return base;    
+    }
+   
+    uint64_t elembase= base;
+    
+    while(true) {
+        
+        uint64_t obo= elembase+elemsize;  
+        
+        if (ptr < obo) {
+            break;    
+        }
+        elembase= obo;
+    }
+    return elembase;
+}
+
+__attribute__((__used__))
+static void 
+FRAMER_update_types_for_heap_obj (HeaderT* ptr,
+                                  short destTid,
+                                  unsigned destTsize,
+                                  unsigned raw_obj_size)
+{
+  assert(raw_obj_size >= destTsize);
+  
+  if (destTsize==raw_obj_size){
+    ptr->FramerTyID= destTid;
+      
+    //ptr->elemsize= destTsize; //already stored at allocation site. 
+  }
+  
+  // (2) if raw_objsize mod bitcasts' destty's size == 0 (not equal)
+  // --> save desty's id in the header and ...some array info in the header also.
+  
+  else if (destTsize < raw_obj_size
+            && ((raw_obj_size%destTsize) == 0)) {
+
+    ptr->FramerTyID= destTid;
+    ptr->elemsize= destTsize;   
+  }
+  
+  // (3) we assume that it is used as a byte array. 
+  // assign ty (-1) FRAMER_is_heap_Init.
+  
+  else {
+    printf("what case? destTsize: %d, raw_obj_size: %d\n",
+            destTsize, raw_obj_size); exit(0);
+  }
+}
+
+__attribute__((__used__))
+static void *
+FRAMER_type_update_at_memWRITE (void * addr,
+                                short destyid) //get typeid of val 
+{
+    printf("UPDATE TYID (UNION)\n");
+    
+    uintptr_t untagged_p= 
+        (uintptr_t)FRAMER_untag_ptr(addr);
+
+    if (untagged_p==(uintptr_t)addr) {
+        return addr;
+    } // TODO: we insert this only for aggregated type (union), so unnecessary?
+
+    unsigned tag= (unsigned)FRAMER_extract_tagval(addr); 
+
+    HeaderT* mptr= FRAMER_get_header_addr (untagged_p, tag);
+    
+    mptr->FramerTyID= destyid;
+    
+    return (void*)untagged_p;
+}
+
+
+__attribute__((__used__))
+__attribute__((always_inline))
+static void
+FRAMER_check_casts (uint64_t untagged_p,
+                    short destyid,
+                    unsigned maxtysperoff,
+                    unsigned maxoffsperty,
+                    unsigned tblentrysize,
+                    unsigned destTsize,
+                    unsigned tag)
+{
+    HeaderT* mptr= FRAMER_get_header_addr (untagged_p, tag);
+    
+    char * base= (char*)mptr + sizeof(HeaderT);
+    // now we got the base. 
+    
+  dbg(
+    printf("\tHeader:\t%p\n", mptr);
+    printf("\tBase:\t%p\n", base);
+  )
+    
+    /* if it's allocated by malloc family, and casted to its effective type */
+
+    if (mptr->FramerTyID==FRAMER_is_heap_obj
+        && untagged_p== (uint64_t)base){ 
+      
+      dbg(
+        printf("\t--> MALLOC! Original tyid:%d\n", mptr->FramerTyID);
+      )  
+      
+      unsigned objsize= mptr->size;
+      
+      FRAMER_update_types_for_heap_obj (mptr, 
+                                        destyid, 
+                                        destTsize,
+                                        objsize); 
+    dbg(
+      printf("\tobj size:\t%hd\n", objsize);  
+      printf("\tdes ty id:\t%hd\n", mptr->FramerTyID);  
+    )
+      return;
+    }
+    
+    uint64_t elembase= 0;
+    
+  #ifdef ENABLE_TRACK_ARRAYS
+   
+    elembase= FRAMER_get_elembase ((uintptr_t)untagged_p,
+                                   (uint64_t)base, 
+                                   mptr->elemsize, 
+                                   mptr->size); 
+  #else
+
+  
+    elembase= (uint64_t)base;  
+ 
+  #endif 
+  
+  dbg(
+    printf("\telemsize:\t%hd\n", mptr->elemsize);  
+    printf("\tuntaggedp:\t%p\n", (void*)untagged_p); 
+    printf("\telembase:\t%p\n", (void*)elembase); 
+  )
+  
+    uint64_t offset= untagged_p - elembase;
+   
+    assert(offset < destTsize);
+     
+ // %%%%%%%%%% debugging. 
+  dbg(
+    printf("\n\toffset:\t%p (offset: elembase~ptr)\n", (void*)offset);
+    printf("\tNew obj tid:\t%d\n", mptr->FramerTyID); 
+    printf("\tDesttyid:\t%hd\n", destyid);  
+  )
+    
+    if (!FRAMER_check_safecast(offset, destyid, 
+                               mptr->FramerTyID, maxtysperoff, 
+                               maxoffsperty, tblentrysize)) { 
+        printf("\t\t----------> UNSAFE CAST! \n");
+    }
+    printf("\t\t----------> SAFE CAST. n");
+
+}
+
+__attribute__((__used__))
+//__attribute__((always_inline))
+static void 
+FRAMER_forall_bitcast (void * addr,
+                       short destyid,
+                       unsigned maxtysperoff,
+                       unsigned maxoffsperty,
+                       unsigned tblentrysize,
+                       unsigned destTsize)
+{
+   
+  dbg(
+    printf("\nHOOK BITCAST ######\n");
+    printf("\tpointer:\t%p\n", addr); 
+  )
+    // *TODO: based on the ptr, get the byte's type id. *
+    // currently pass static src id, and see if it's the safe cast. 
+    // TODO: later pass runtime src tid. 
+   
+    uintptr_t untagged_p= 
+        (uintptr_t)FRAMER_untag_ptr(addr);
+    
+    if (untagged_p==(uintptr_t)addr) {
+        return;
+    }
+    
+    unsigned tag= (unsigned)FRAMER_extract_tagval(addr); 
+    
+    //asm("NOP");
+    FRAMER_check_casts (untagged_p, destyid, 
+                        maxtysperoff, maxoffsperty,  
+                        tblentrysize, destTsize, tag);
+   
+}
+
+/* for mem read for union types. performs type checking */
+__attribute__((__used__))
+static void *
+FRAMER_type_check_at_memREAD (void * addr,
+                              short destyid,
+                              unsigned maxtysperoff,
+                              unsigned maxoffsperty,
+                              unsigned tblentrysize,
+                              unsigned destTsize)
+
+{
+    uintptr_t untagged_p= (uintptr_t)FRAMER_untag_ptr(addr);
+
+    if (untagged_p==(uintptr_t)addr) {
+        return addr;
+    }
+
+    unsigned tag= (unsigned)FRAMER_extract_tagval(addr); 
+  
+    FRAMER_check_casts (untagged_p, destyid, 
+                        maxtysperoff, maxoffsperty, 
+                        tblentrysize, destTsize, tag);
+     
+    return (void*)untagged_p; 
+}
+
+
+//void FRAMER_func_epilogue (void* tagged)
+//__attribute__((always_inline))
+__attribute__((__used__))
+static void FRAMER_reset_entries_for_alloca (void* tagged) 
+{
+#ifndef DISABLE_ALLOCA_METADATA_UPDATE
+    dbg(printf("reset entries\n"));
+    if (FRAMER_supplementary_extract_flag(tagged)==FRAMER_is_smallframe) {
+        return;
+    }
+    uintptr_t untagged_p= (uintptr_t)FRAMER_untag_ptr(tagged);
+    uintptr_t tagvec= FRAMER_extract_tagvec (tagged); 
+
+    FRAMER_empty_metadata_entry (untagged_p, tagvec);
+#endif
+}
+
+
+/*__attribute__((__used__))
+static void
+FRAMER_create_hashtable (void* baseOf_OffsetTable,
+                         short total_offset_count,
+                         short max_ty_count_per_off,
+                         short max_offset_val,
+                         unsigned tblentrysize)   
+{
+//  GHashTable *hash;
+
+  hash= g_hash_table_new(g_direct_hash, g_direct_equal);
+
+  for (unsigned i=0; i<total_offset_count; i++) {
+    // * insert values 
+    
+    // read {uint64_t key (tid/offset combimed)}.   
+    uint64_t * tykey= (uint64_t*)(baseOf_OffsetTable + i*tblentrysize); 
+    
+    short * kylist= (short*)(tykey + 1);  
+    
+    //TODO: kylist type?? think of above/below code. maybe have to re-write. 
+    
+    g_hash_table_insert(hash, (GINT_TO_POINTER)(*tykey), kylist);
+
+  }
+}
+*/
+
+
+//__attribute__((always_inline))
+__attribute__((__used__))
+static void 
+FRAMER_do_initializing (unsigned numStructTyCount, 
+                        void* baseOf_StructTable,
+                        void* baseOf_OffsetTable,
+                        short total_offset_count,
+                        short max_ty_count_per_off,
+                        short max_offset_val,
+                        unsigned tblentrysize)   
+    /*                void* baseof_SafeCastTable,
+                    unsigned safecastcolumncount,// n of n x m
+                    unsigned safecastrowcount) // m of n x m */
+{
+
+    FRAMER_structTy_count= numStructTyCount;
+    FRAMER_baseOfStructTable= (StructEntryT*)baseOf_StructTable;
+
+    FRAMER_baseOf_OffsetTable= baseOf_OffsetTable;
+    
+    FRAMER_total_offset_count= total_offset_count;
+    FRAMER_max_ty_count_per_off= max_ty_count_per_off;
+    FRAMER_max_offset_val= max_offset_val;
+     
+    /*FRAMER_baseOfSafeCastTable= (SafeCastEntryT*)baseof_SafeCastTable;
+    FRAMER_safecast_col_num= safecastcolumncount; 
+    FRAMER_safecast_row_num= safecastrowcount; 
+    */
+
+  #ifdef ENABLE_TYPECAST_CHECK 
+    FRAMER_metadata_file_size = FRAMER_metatable_count
+                                *(sizeof(EntryT)*FRAMER_num_of_entries_per_slot);
+    dbg(printf("entrysize * #entries per slot:\t%lu\n", 
+        sizeof(EntryT)*FRAMER_num_of_entries_per_slot);)
+  #else
+    FRAMER_metadata_file_size = FRAMER_metatable_count
+                                *sizeof(SlotT);
+  #endif
+     
+    //printf("\n***** Initialising *************\n");
+    dbg(printf("\n***** Initialising *************\n"));
+    dbg(printf("HeaderT size:\t%lu\n", sizeof(HeaderT)));
+    dbg(printf("#Struct types:\t%u\n", numStructTyCount));
+    dbg(printf("StructBasicTybase:\t%p\n", baseOf_StructTable));
+    dbg(printf("U_space base:\t%p\n", 
+        (void*)FRAMER_slotbase_of_userspace_start));
+     
+    //FRAMER_supplementary_setup_FRAMER_BasicTy_table();
+    assert_dbg(assert (FRAMER_llvm_BasicTyCount+ FRAMER_extra_BasicTyCount==25
+            && "Assert failed: Framer BasicTyCounts do not fit!\n");)
+    assert (FRAMER_llvm_BasicTyCount+ FRAMER_extra_BasicTyCount==25);
+
+    //size_t page_size= sysconf(_SC_PAGE_SIZE); 
+    environ = NULL;
+   
+  #ifdef ENABLE_TYPECAST_CHECK  
+    FRAMER_TABLE= (EntryT*)mmap (0, 
+  #else
+    FRAMER_TABLE= (SlotT*)mmap (0, 
+  #endif
+                                ((size_t)FRAMER_metadata_file_size),
+                                PROT_READ | PROT_WRITE | PROT_NONE,
+                                MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, 
+                                -1,//FRAMER_fd, 
+                                (off_t)0);
+   
+    if (FRAMER_TABLE == MAP_FAILED) {
+        printf ("ERROR:mmap error for metadata table. Error: %s\n", strerror(errno));
+        exit(0);
+    }
+   
+    /*FRAMER_create_hashtable(baseOf_OffsetTable, 
+                            total_offset_count,
+                            max_ty_count_per_off,
+                            max_offset_val,
+                            tblentrysize);   
+    */
+     
+    dbg(printf("Table base:\t%p\n", FRAMER_TABLE));
+    dbg(printf(" Initialising finishing..\n"));
+    //printf("Table base:\t%p\n", FRAMER_TABLE);
+    //printf(" Initialising finishing..\n");
+}
+
+__attribute__((__used__))
+static void FRAMER_exit_main ()
+{
+//    printf("untagcount: %d\n", untagcount);
+    munmap (FRAMER_TABLE, 
+            FRAMER_metadata_file_size);
+    close(FRAMER_fd);
+}
+
+/*
+   VoidTyID = 0, HalfTyID,      FloatTyID,      DoubleTyID, 
+   X86_FP80TyID, FP128TyID,     PPC_FP128TyID,  LabelTyID, 
+   MetadataTyID, X86_MMXTyID,   TokenTyID,      IntegerTyID, 
+   FunctionTyID, StructTyID,    ArrayTyID,      PointerTyID, 
+   VectorTyID 
+*/
+
+#endif // USERSHOOK_h_
+
+#ifdef __cplusplus
+}
+#endif
