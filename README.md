@@ -2,10 +2,10 @@
  
 aSTEAM Project https://asteam.korea.ac.kr
 
-FRAMER is a software-based Capability Model, a part of MIU:Memory Integrity Utilities.
-This is implemented as LLVM Link Time Optimization Pass.
+FRAMER is software-based Capability Model, a part of MIU:Memory Integrity Utilities.
+This is implemented as LLVM Link Time Optimization (LTO) Pass.
 
-This takes C/C++ SRC codes, and performs program transformation 
+This takes C/C++ SRC codes, performs program transformation/analysis 
 on LLVM intermediate representation, and produces a instrumented executable.
 This consists of FRAMER's program transformation pass,
 compiler optimization passes, and static and binary libraries.
