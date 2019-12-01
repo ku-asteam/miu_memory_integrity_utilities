@@ -671,10 +671,15 @@ void PassManagerBuilder::populateModulePassManager(
 
 void PassManagerBuilder::addLTOOptimizationPasses(legacy::PassManagerBase &PM) {
   
+  addInitialAliasAnalysisPasses(PM); // added 1/5/2019
+  PM.add(createInstructionCombiningPass()); // added 1/5/2019 
   PM.add(new Framer());
+  PM.add(new FramerDelSafeAccess());
   PM.add(createInstructionCombiningPass()); // Combine silly seq's
 
 ///// LTO passes for FramerLoopOpt
+  //disabled for measurement 
+  
   PM.add(createCorrelatedValuePropagationPass()); //test5s 
   PM.add(createPromoteMemoryToRegisterPass());
   PM.add(createInstructionCombiningPass()); // Combine silly seq's
@@ -698,8 +703,13 @@ void PassManagerBuilder::addLTOOptimizationPasses(legacy::PassManagerBase &PM) {
             //test3e4e5e
 
   PM.add(new FramerLoopOpt());
-// BUGGY! //PM.add(new FramerDelSafeAccess());
+  //BUGGY! 
+  //PM.add(new FramerDelSafeAccess());
+  
   PM.add(createInstructionCombiningPass()); // Combine silly seq's
+
+ //disabled for measurement
+
 //  PM.add(createIPSCCPPass());       // added by Framer
 //  PM.add(createConstantMergePass());  //added by Framer
 //  PM.add(createGlobalDCEPass());    //added by Framer

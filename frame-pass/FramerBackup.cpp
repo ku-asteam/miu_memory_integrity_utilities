@@ -1,6 +1,55 @@
 //==---- Framer.cpp ------==//
 
+/*
+#include "llvm/Support/raw_ostream.h"
+#include "llvm/Pass.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/TypeFinder.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/IR/Instruction.h"
+#include "llvm/ADT/Statistic.h"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/Type.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/InstIterator.h"
+#include "llvm/IR/GlobalValue.h"
+#include "llvm/Support/DynamicLibrary.h"
+#include "llvm/Support/MathExtras.h"
+#include "llvm/IR/Argument.h"
+#include <map>
+#include "llvm-c/Core.h"
+#include "llvm/Analysis/ValueTracking.h"
+#include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/IR/Use.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/IR/Operator.h"
+#include "llvm/IR/Instruction.def"
+#include "llvm/IR/InstrTypes.h"
+#include "llvm/ADT/APInt.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallSet.h"
+#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Intrinsics.h"
+#include "llvm/Transforms/Utils/CtorUtils.h"
+#include "../../../../llvm-4.0.0.src/lib/IR/ConstantsContext.h"
+#include "llvm/Analysis/ConstantFolding.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
+#include "llvm/IR/Dominators.h"
+#include "llvm/Analysis/PostDominators.h" 
+#include "llvm/Support/CommandLine.h"
+#include "llvm/PassRegistry.h"
+#include <llvm/IR/PassManager.h>
+#include <llvm/Transforms/IPO/PassManagerBuilder.h>
+#include "llvm/IR/LegacyPassManager.h"
+*/
+
+//#include "llvm-c/Initialization.h"
 #include "llvm/Analysis/Passes.h"
+//#include "llvm/Analysis/ScopedNoAliasAA.h"
 #include "llvm/Analysis/TypeBasedAliasAnalysis.h"
 #include "llvm/Transforms/Scalar/GVN.h"
 #include "llvm/IR/DataLayout.h"
@@ -12,9 +61,40 @@
 
 #include "llvm/Transforms/frame-pass/Framers.h"
 #include "llvm/Transforms/frame-pass/Framer.h"
-//#include "llvm/Transforms/frame-pass/Framer.h"
 
-//#define DEBUG_TYPE "framer"
+#define DEBUG_TYPE "framer"
+
+//%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+//%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+//%%
+
+/// STORE ONLY CHECK /////////////////
+#define STORE_ONLY_CHECK
+//%%
+//// TYPECHECK ////////////
+//#define TYPECHECK
+
+///// TRACK STRUCT //////////
+//#define TRACK_STRUCT_ALSO
+
+//// DISABLE handling alloca.
+//#define DISABLE_HOOK_ALLOCA  
+
+//// DISABLE handling global variables
+//#define DISABLE_HOOK_GLOBAL_VARIABLE
+
+// DISABLE tagging GVs.
+//#define DISABLE_TAGGING_GV
+
+// DISABLE replacement debug. (Disable anyway for release mode)
+//#define DISABLE_FAKE_REPLACEMENT
+
+// DISABLE cheap checks just to check check_mem hook is optimized away or not.
+//#define DISABLE_CHEAP_CHECKS
+
+//%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+//%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
 
 //#define MYDEBUG
 #ifdef MYDEBUG
@@ -47,6 +127,12 @@ enum CalledFuncEnum {
     LLVMMemSetIsCalled,
     ExternalFuncIsCall
     
+    //LLVMMemCpyIsCalled,
+    //LLVMMemMoveIsCalled,
+    //LLVMMemCpySRCIsCalled,
+    //LLVMMemCpyDESTIsCalled,
+    //LLVMMemMoveSRCIsCalled,
+    //LLVMMemMoveDESTIsCalled,
 };
 
 unsigned tempGVcount=0;
@@ -65,46 +151,16 @@ BasicBlock *    fstBBOfMainFunction= nullptr;
 BasicBlock *    initBBOfMain= nullptr;
 BasicBlock *    GVsBBOfMain= nullptr;
 
+/*
+const char * prefix_of_hookGV_name = "FRAMER_";
+const char * prefix_of_hookfunc_name = "FRAMER_forall_";
+const char * prefix_of_supplementary_funcName = "FRAMER_supplementary_";
+*/
 
 bool HookDefinitionExists [100]={0};
 bool HookDefForCalledFuncExists [CalledFuncEnum_count]={0};
 
-vector <Type*> AllTypeList;
-
 vector <StructType*> allStructTyList;
-vector <vector<pair<short, vector<short>>>> tyoffsets; 
-
-#ifdef ENABLE_SPACEMIU
- #ifndef RTTABLE_VERSION_1
-  vector <vector <short>> flatrtoffsets;
-  unsigned MaxOffset;
-  short max_upcasts;
- #endif
-#endif
-
-vector <vector<short>> SafeCasts;
-vector <vector<short>> DownCasts;
-
-// * Union GV's*
-vector <GlobalVariable*> GVUnions;
-
-// * Heap unions
-vector <Value*> HeapUnions;
-
-// * the total number of all offsets for all types * 
-unsigned totaloffsetcount= 0;
-
-// * max tid count per offset.   
-unsigned maxtysperoff= 0;
-
-// * max offset count per ty
-unsigned maxoffsperty= 0;
-
-// * max offset value (not count, but value!) 
-unsigned maxoffsetval= 0;
-
-// * entry type size of an offset table *
-unsigned tblentrysize= 0;
 
 StructType*     HeaderTy=nullptr;
 IntegerType*    OffByOneTy=nullptr;
@@ -112,17 +168,6 @@ IntegerType*    OffByOneTy=nullptr;
 /// GlobalVariable * basicTypeTable; 
 GlobalVariable* StructTyTable=nullptr; /* StructTyTable in Arraytype */ 
 GlobalVariable* startStructTypeTable=nullptr; 
-
-// * GlobalVariable * SafeCastsTable*
-GlobalVariable* SafecastTable=nullptr; /* SafeCastsTable in Arraytype */ 
-GlobalVariable * rtOffsetTbl= nullptr;
-
-////
-
-ArrayType * SafeTidsTy= nullptr;
-StructType * oneOffsetTy= nullptr;
-ArrayType * entryT= nullptr;
-ArrayType * tableT= nullptr;
 
 const unsigned llvmbasicTyCount= 17;
 const unsigned extrabasicTyCount= 8; //int8,16,32,64,128,and then i1, i48!!
@@ -139,6 +184,223 @@ const unsigned FRAMER_TyIDStart=100; //we use spare bits for big-framed allocati
 unsigned maxcount100temp=0;
 vector <Value*> paddedGVs;
 set <Instruction*> FramerLoads;
+/*
+namespace
+{
+struct Framer : public ModulePass {
+    public:
+        char static ID;
+        Framer() : ModulePass(ID) {};
+            
+        //virtual void getAnalysisUsage(AnalysisUsage &AU) const {
+        //AU.setPreservesCFG();
+        //AU.addRequired<PostDominatorTreeWrapperPass>();
+        //}
+        //https://stackoverflow.com/questions/24174285/minimal-code-for-dynamically-loaded-analysis-pass-and-analysis-group-in-llvm 
+         
+        virtual bool    runOnModule(Module &M);
+        virtual bool    runOnFunction (Function &F, 
+                                        Module &M); 
+        bool            runOnBasicBlock (BasicBlock &BB, 
+                                        Module &M); 
+
+        protected:
+            Instruction * getNextInst (Instruction * Inst);
+            GlobalVariable * getNextGV (GlobalVariable * GV, Module &M); 
+
+            bool isTaggedPointer        (Value* accessedPtr); 
+            bool isHookFamilyFunction   (Function * F); 
+
+            void insertCastInstForArg   (Instruction * insertBeforeMe, 
+                                        vector<Value*> & arglist);
+            void pushtoarglist (Instruction * insertAfterMe, 
+                                Type * paramTy, 
+                                Value * arg, 
+                                vector<Value*> & arglist);
+
+            void pushArgForBitCastInst (FunctionType *FTy, 
+                                       BitCastInst * BCI, 
+                                       vector<Value*> & arglist);
+            void pushArgForFPToSIInst  (FunctionType * FTy, 
+                                       FPToSIInst * FTS, 
+                                       vector<Value*> & arglist); 
+            
+            Value * castingArgToParam (Instruction * I, 
+                                      Type * paramType, 
+                                      Value * arg);
+
+            void getArgumentsForGV (FunctionType * FTy, 
+                                    GlobalVariable * GV, 
+                                    vector<Value*> & arglist, 
+                                    Instruction * insertBeforeMe);
+           
+            void doInitFuncHook     (Module &M);
+            void doExitingMain      (Module &M);
+            bool isLeafOfDomTree    (BasicBlock* bb, PostDominatorTree & postDT); 
+            void insertEpilogueOfFunc (Instruction* tagged, Module &M);//, PostDominatorTree & postDT);  
+            void doInitialSetup     (Module &M);
+            
+            void create1stBBOfMain          (Module &M); 
+            void flagHooksDefinitionExists  (Module &M);
+            void assertBasicTyTable         (Module &M);
+            void runOnGlobalVariables       (Module &M);       
+            void padObject                  (Value* obj, Module &M);
+            unsigned getFramerTypeID        (Type* ty);
+            unsigned getUserIntegerTypeID   (IntegerType* ty);
+            Constant* constructAddressValue (Module &M, GlobalVariable* tab, unsigned subindex);
+            Constant* getFramerTyEntryAddress(Module &M, unsigned ftid);
+            int  getUserStructTypeID        (StructType* ty);
+            void createStructTypeTable      (Module &M); 
+            void createUserStructTyList     (Module &M);
+            unsigned  getMaxFieldCountOfStruct   ();
+            bool isFramerIntID              (unsigned id);
+            bool isFramerStructID           (unsigned id);
+            Value* tagFramerTyID            (Value * val, 
+                                            unsigned id, 
+                                            Module &M); 
+           
+            bool hasConstructorAttribute (GlobalVariable * GV);
+            bool hasDestructorAttribute  (GlobalVariable * GV);
+            bool isPrintfStr             (GlobalVariable * GV);
+            
+            Constant* tagConstantPtr (Constant* ptr, 
+                                      Constant* tag, 
+                                      Constant* flag, 
+                                      Module & M); 
+            Constant* getPaddedEndInt       (GlobalVariable* paddedGV,
+                                            Module & M); 
+            Constant* getLogFrameSize       (Constant* base, 
+                                            Constant* end,
+                                            Module & M); 
+            Constant* getOffset            (Constant* base, 
+                                            Module & M); 
+            Constant* getTaggedConstantPtr (GlobalVariable* basePadded,
+                                            Constant* origPtr,
+                                            Module & M); 
+            Constant* createHeaderInitializer (GlobalVariable* GV,
+                                               unsigned Tid,
+                                               unsigned gvsize);
+
+            GlobalVariable* doGlobalVariable (GlobalVariable * GV, 
+                                            Function * F, 
+                                            Instruction * insertBeforeMe, 
+                                            Module & M);
+            Value * getEndAddressGV (GlobalVariable * GV, 
+                                    uint64_t numElems, 
+                                    unsigned numBitsOfElemTy, 
+                                    Type * typeToConvertTo, 
+                                    Instruction * insertBeforeMe, 
+                                    Module & M);
+            uint64_t getArraySizeforGV (Type * allocatedObjTy);
+
+            void insertFunctionCallforGV(GlobalVariable * GV, 
+                                        Function * F, 
+                                        Instruction * insertBeforeMe);
+            void insertFunctionCall (Function * F, 
+                                     Instruction * insertBeforeMe, 
+                                     vector<Value*> & arglist );
+            CallInst *  insertHookAndReturn (Function * F, 
+                                            Instruction * insertBeforeMe, 
+                                            vector<Value*> & arglist); 
+            
+            Instruction* castAndreplaceAllUsesWith (Value * originalPtr, 
+                                                    Value * modifiedPtr); 
+            void insertCastToRestoreType    (Instruction* insertAfterMe,
+                                            vector<Value*> & castinglist);
+            Value * getArraySize            (AllocaInst * AI, 
+                                            Type * funcParamTy);
+            Type *  getTypeOfElemOfArray    (Type * allocatedType);
+            Value * getPrimitiveEndAddress  (AllocaInst * baseAddr, 
+                                            Instruction * insertBeforeMe, 
+                                            Module & M);
+            Value * getArrayEndAddress      (Value * baseAddr, 
+                                            unsigned numBitsOfElemTy, 
+                                            Value * numArrayElements, 
+                                            Type * typeToConvertTo, 
+                                            Instruction * insertBeforeMe, 
+                                            Module & M );
+            Value * getEndAddrforMalloc     (Value * baseAddr, 
+                                            Value * numBytes, 
+                                            Type * typeToConvertTo, 
+                                            Instruction * insertBeforeMe, 
+                                            Module & M);
+            
+            Value * createConstantIntInstance   (unsigned valueToBeInstantiated, 
+                                                Type * whatTypeItShouldBe);
+            Value * constructValueFromFunc      (unsigned valueToBeInstantiated, 
+                                                Function * F, 
+                                                unsigned paramIndex);
+
+            unsigned getBitwidth    (Type * allocatedType, bool isOutMost=true);
+            unsigned getPrimTyBits  (unsigned Typeid);
+            uint64_t getBitwidthOfStruct ( StructType * STy );
+           
+            size_t getNewAlignment (size_t totalsize);
+            size_t pow2roundup (size_t x);
+
+            // process memory access instruction 
+            Instruction* doAllocaInst           (AllocaInst * AI, 
+                                                Instruction * successorInst, 
+                                                Module & M);
+                                                //PostDominatorTree & postDT);
+            Instruction* doPrimitiveAllocaInst  (AllocaInst * AI, 
+                                                Instruction * successorInst, 
+                                                Module & M);
+                                                //PostDominatorTree & postDT);
+            Instruction* doArrayAllocaInst      (AllocaInst * AI, 
+                                                Instruction * successorInst, 
+                                                bool arraykind, 
+                                                Module & M);
+                                                //PostDominatorTree & postDT);
+            void doLoadInst             (LoadInst * LI, Instruction * successorInst, Module & M);
+            void doStoreInst            (StoreInst * SI, Instruction * successorInst, Module &M);
+            void doGetElementPtrInst    (GetElementPtrInst * GEP, Instruction * successorInst, Module &M);
+
+            // process Call Instruction 
+            Instruction* doCallInst     (CallInst * CI, Instruction * successorInst, Module &M);
+            Instruction* doCallInstMalloc(CallInst * CI, Instruction * successorInst, Module & M);
+            Instruction* doCallInstFree (CallInst * CI, Instruction * successorInst, Module & M);
+            
+            void doCallLLVMMemTransfer  (MemTransferInst * MI, Instruction * successorInst, Module &M);            
+            void doCallLLVMMemSet       (MemSetInst * MMI, Instruction * successorInst, Module &M);            
+            void doCallExternalFunc     (CallInst * CI, Instruction * successorInst, Module &M);
+ 
+            /// process Cast Instruction 
+            void doBitCastInst  (BitCastInst * BCI, Instruction * successorInst, Module &M);
+            void doSIToFPInst   (SIToFPInst * STF, Instruction * successorInst, Module &M);
+            void doPtrToIntInst (PtrToIntInst * PTI, Instruction * successorInst, Module &M);
+            void doIntToPtrInst (IntToPtrInst * IPI, Instruction * successorInst, Module &M);
+            void doFPToSIInst   (FPToSIInst * FTS, Instruction * successorInst, Module &M);
+            void doTruncInst    (TruncInst * TR, Instruction * successorInst, Module &M);
+            void doSExtInst     (SExtInst * SI, Instruction * successorInst, Module &M);
+            void doZExtInst     (ZExtInst * ZI, Instruction * successorInst, Module &M);
+            void doFPExt        (FPExtInst * FEI, Instruction * successoInst, Module & M);
+            void doAddrSpaceCastInst (AddrSpaceCastInst * I, Instruction * successorInst, Module & M);
+
+            // do Possibly Exact operator 
+            void doPossiblyExactOp  (PossiblyExactOperator * PEO, Instruction * successorInst, Module & M);
+            void doUDivOp           (UDivOperator * UDO, Instruction * successorInst, Module & M);
+            void doSDivOp           (SDivOperator * SDO, Instruction * successorInst, Module & M);
+            void doLShrOp           (LShrOperator * UDO, Instruction * successorInst, Module & M);
+            void doAShrOp           (AShrOperator * OP, Instruction * successorInst, Module &M);
+          
+            // do OverFlow Binary Operator  
+            void doOverflowBinaryOp (OverflowingBinaryOperator * OFO, Instruction * successorInst, Module & M);
+            void doSubOp    (SubOperator * SO, Instruction * successorInst, Module &M);
+            void doMulOp    (MulOperator * MO, Instruction * successorInst, Module &M);
+            void doAddOp    (AddOperator * AO, Instruction * successorInst, Module &M);
+           
+            bool isItsUser (Value * useuser, User * useruser);
+            Value * getOriginalAlloca (Value* ptr); 
+            bool isToBeTaggedType (Type* t);
+
+            void restoreModifiedPtr (LoadInst * LI); 
+            void castAndreplaceUsesOfWithBeforeInst (Instruction * user, Value * from, Value * toThis);
+            Type* getResultTypeOfMalloc (CallInst * CI);
+            
+    };
+}
+*/
 
 static RegisterPass<Framer> 
 X ("framer", "Framer Pass", false, true);
@@ -151,6 +413,13 @@ static void registerFramer(const PassManagerBuilder &,
                            legacy::PassManagerBase &PM) {
     PM.add(new Framer());
 }
+
+static RegisterStandardPasses
+    RegisterFramer(PassManagerBuilder::EP_ModuleOptimizerEarly,
+                        registerFramer);
+static RegisterStandardPasses
+    RegisterFramer0(PassManagerBuilder::EP_EnabledOnOptLevel0,
+                        registerFramer); 
 */
 
 ///////////////////////////////////////////////
@@ -165,9 +434,7 @@ INITIALIZE_PASS(Framer, "framer", "Framer Pass", false, false)
 
 //static RegisterAnalysisGroup<PostDominatorTreeWrapperPass> Y(X);
 
-void 
-Framer::insertCastInstForArg (Instruction * insertBeforeMe, 
-                                      vector<Value*> & arglist )
+void Framer::insertCastInstForArg(Instruction * insertBeforeMe, vector<Value*> & arglist )
 {
     for(vector<Value*>::iterator it = arglist.begin(), ie = arglist.end(); it!=ie ; ++it){
         if (Instruction * mycast = dyn_cast<Instruction>(*it)){
@@ -177,10 +444,31 @@ Framer::insertCastInstForArg (Instruction * insertBeforeMe,
         }
     }
 }
+/*
+static bool 
+isHookFamilyFunction (Function * F ) 
+{ // False when this function is from static lib whose functions are added to target  
+    StringRef funcName = F->getName();
 
-GlobalVariable* 
-Framer::getNextGV (GlobalVariable * GV, 
-                           Module &M)
+    if ( funcName.startswith(prefix_of_hookfunc_name)  //if it's hook func
+        || funcName.startswith ("FRAMER_") 
+        || funcName.startswith(prefix_of_supplementary_funcName)
+       // || funcName.equals( StringRef("do_initializing"))
+        || funcName.startswith("__wrap_malloc")
+        || funcName.startswith("__wrap_free")) 
+        {
+         dbg(errs()<<"HOOK FAMILY\n";)
+         //or sumplementary hook
+        
+        return true; 
+    }
+    else {
+        return false;
+    }
+}
+*/
+
+GlobalVariable* Framer::getNextGV (GlobalVariable * GV, Module &M)
 {
     Module::global_iterator I (GV);
     I++;
@@ -191,29 +479,37 @@ Framer::getNextGV (GlobalVariable * GV,
     }
     return &*I;
 }
-
-Value * 
-Framer::createConstantIntInstance (unsigned val, 
-                                          Type * destTy)
+/*
+static Instruction * 
+getNextInst (Instruction * Instr)
 {
-    return ConstantInt::get(destTy, val); 
+    BasicBlock::iterator I (Instr);
+    I++;
+    
+    if (I == Instr->getParent()->end()) {
+        dbg(errs()<<"Next is the last inst of BB!\n";)
+        return nullptr;
+    }
+    return &*I;
+}
+*/
+
+Value * Framer::createConstantIntInstance (unsigned valueToBeInstantiated, Type * whatTypeItShouldBe)
+{
+    return ConstantInt::get(whatTypeItShouldBe, valueToBeInstantiated); 
 }
 
-Value * 
-Framer::constructValueFromFunc (unsigned val, 
-                                        Function * F, 
-                                        unsigned paramIdx)
+Value * Framer::constructValueFromFunc (unsigned valueToBeInstantiated, 
+                                            Function * F, 
+                                            unsigned paramIndex)
 {
-    return ConstantInt::get(F->getFunctionType()->getParamType(paramIdx), 
-                            val); 
+    return ConstantInt::get(F->getFunctionType()->getParamType(paramIndex), 
+                            valueToBeInstantiated); 
 }
 
-Value * 
-Framer::getArraySize (AllocaInst * AI, 
-                              Type * funcParamTy) 
+Value * Framer::getArraySize (AllocaInst * AI, Type * funcParamTy) 
 {
-    if (AI->isArrayAllocation() 
-        || AI->getArraySize() != ConstantInt::get(AI->getArraySize()->getType(), 1)) {
+    if (AI->isArrayAllocation() || AI->getArraySize() != ConstantInt::get(AI->getArraySize()->getType(), 1)) {
         return AI->getArraySize();
     }
     else if (AI->getAllocatedType()->isArrayTy()){
@@ -229,8 +525,7 @@ Framer::getArraySize (AllocaInst * AI,
     }
 }
 
-Type * 
-Framer::getTypeOfElemOfArray (Type * allocatedType)
+Type * Framer::getTypeOfElemOfArray (Type * allocatedType)
 {
     if  (ArrayType *  MyArrayTy = dyn_cast<ArrayType>(allocatedType)) { 
         return MyArrayTy->getElementType();
@@ -240,13 +535,10 @@ Framer::getTypeOfElemOfArray (Type * allocatedType)
     }
 }
 
-void 
-Framer::insertCastToRestoreType (Instruction* insertAfterMe, 
-                                         vector<Value*> & castinglist)
+void Framer::insertCastToRestoreType (Instruction* insertAfterMe, 
+                                            vector<Value*> & castinglist)
 {
-    for(vector<Value*>::iterator it= castinglist.begin(), 
-            ie = castinglist.end(); it!=ie ; ++it){
-        
+    for(vector<Value*>::iterator it = castinglist.begin(), ie = castinglist.end(); it!=ie ; ++it){
         if (Instruction * mycastinst = dyn_cast<Instruction>(*it)){
             if (!mycastinst->getParent()) {
                 mycastinst->insertAfter (insertAfterMe);
@@ -262,20 +554,29 @@ Framer::insertCastToRestoreType (Instruction* insertAfterMe,
     }  
 } 
 
-#ifdef ENABLE_TRACK_ARRAYS            
-
-Instruction* 
-Framer::doArrayAllocaInst (AllocaInst * AI, 
-                          Instruction * successorInst, 
-                          bool notDynamicArray,
-                        #ifdef ENABLE_SPACEMIU  
-                          vector <AllocaInst*> & LocalUnions, 
-                        #endif
-                          Module &M)
+Instruction* Framer::doArrayAllocaInst (AllocaInst * AI, 
+                                        Instruction * successorInst, 
+                                        bool notDynamicArray,
+                                        Module &M)
 {
     //FRAMER_forall_alloca (void * locationOfAllocatedObject, uint64_t numElems, enum BASICType allocatedTypeID, unsigned numBytesPerElem )
     // TODO This is only for array of basictypes. Add struct type for elem... ALSO TODO merge this with doprimitivealocainst? duplicated code lines..
 
+//debug.s.
+ /*
+if (AI->getFunction()->getName().equals("BZ2_blockSort")){
+    ArrayType *at= dyn_cast<ArrayType>(AI->getAllocatedType());
+    assert(at!=nullptr);
+    Type * elemt= at->getElementType();
+    if (isa<IntegerType>(elemt)) { 
+        IntegerType * intt= cast<IntegerType>(elemt); 
+        if (at->getNumElements()==256 && intt->getIntegerBitWidth()==32) {
+            return nullptr; 
+        }
+    }
+}
+*/
+//debug.e
 
     Function * hook     = M.getFunction ("FRAMER_forall_alloca");
     Type * typeOfElem   = getTypeOfElemOfArray (AI->getAllocatedType());
@@ -337,6 +638,7 @@ Framer::doArrayAllocaInst (AllocaInst * AI,
                                             AI);
     }
     //--------- 
+    //Value * locationOfAllocatedObject= origObj; //AI;
 
     Value * numElems       = getArraySize(AI, hook->getFunctionType()->getParamType(1));
     Value * typeIDOfElem   = constructValueFromFunc (FramerTyID, hook, 2);
@@ -372,24 +674,27 @@ Framer::doArrayAllocaInst (AllocaInst * AI,
     if (typeRestoringPtrForReplacedUse != nullptr) {
         typeRestoringPtrForReplacedUse->insertAfter (CI); 
     }
-  
-  #ifndef ENABLE_SPACEMIU
-
-  //  insertEpilogueOfFunc (CI, M);//, postDT);
-  
-  #endif
-
-  #ifdef ENABLE_SPACEMIU  
     
-    insertLocalUnionsList (paddedAI, LocalUnions);
-  
-  #endif
-  
+    insertEpilogueOfFunc (CI, M);//, postDT);
     dbg(errs()<<"exiting array alloca..\n";)
     return AI;
 }
 
-#endif
+/* not used
+Value * Framer::getPrimitiveEndAddress (AllocaInst * baseAddr, Instruction * insertBeforeMe, Module & M) 
+{
+    ConstantInt * numBytes       = 
+        ConstantInt::get(Type::getInt64Ty(M.getContext()), 
+                        (baseAddr->getAllocatedType()->getPrimitiveSizeInBits())/8);
+    PtrToIntInst * baseAddrInInt = 
+        new PtrToIntInst (baseAddr, Type::getInt64Ty(M.getContext()), "", insertBeforeMe);
+    BinaryOperator * addByteNumToBase = BinaryOperator::Create (Instruction::Add, baseAddrInInt, numBytes, "", insertBeforeMe);
+    IntToPtrInst * endAddr       = new IntToPtrInst (addByteNumToBase, baseAddr->getType(), "", insertBeforeMe);   
+     
+    return endAddr;
+
+}
+*/
 
 /* not used 
 Value * Framer::getArrayEndAddress 
@@ -472,7 +777,7 @@ unsigned Framer::getBitwidth (Type * allocatedType)
             }
         }
         else {
-            errs()<<"1. what type is this??"<<*allocatedType<<"\n";
+            errs()<<"1. what type is this??\n";
             exit(0);
         }
     }
@@ -481,10 +786,8 @@ unsigned Framer::getBitwidth (Type * allocatedType)
         return dlayout->getPointerSizeInBits();
     }
     else {
-        assert (isa<FunctionType>(allocatedType));
-        errs()<<"cast: function type in getBitwidth\n";
-        return 0;
-        //exit(0);
+        errs()<<"2. What type is this?!\n";
+        exit(0);
     }
 }
 
@@ -993,16 +1296,8 @@ int Framer::getUserIntegerTypeID (IntegerType* ty)
     return intID;
 }
 
-unsigned 
-Framer::getFramerTypeID (Type* ty)
+unsigned Framer::getFramerTypeID (Type* ty)
 {
-  
-  #ifdef ENABLE_SPACEMIU
-
-    return getIdx (AllTypeList, ty); 
-  
-  #else 
-    
     unsigned tID= 0;
 
     if ( StructType* st= dyn_cast<StructType>(ty)){
@@ -1023,11 +1318,7 @@ Framer::getFramerTypeID (Type* ty)
     else {
         tID= ty->getTypeID();
     }
-
     return tID;
-  
-  #endif
-    
 }
 
 Constant* Framer::constructAddressValue (Module &M, GlobalVariable* tab, unsigned subindex)
@@ -1236,12 +1527,9 @@ Constant* Framer::getFramerTyEntryAddress (Module &M, unsigned ftid)
 Instruction* 
 Framer::doPrimitiveAllocaInst(AllocaInst * AI, 
                               Instruction * successorInst, 
-                            #ifdef ENABLE_SPACEMIU
-                              vector <AllocaInst*> & LocalUnions, 
-                            #endif
                               Module &M)
+                              //PostDominatorTree & postDT)
 {
-
     //for struct alloca, get type of alloca. -> create struct-> replace all alloca uses. then replace itself.
 
     //perlbench
@@ -1269,7 +1557,6 @@ Framer::doPrimitiveAllocaInst(AllocaInst * AI,
                 }
             }
         }
-
     }
     //perlbench
 
@@ -1330,81 +1617,58 @@ Framer::doPrimitiveAllocaInst(AllocaInst * AI,
                     numBytesOfElemTy, 
                     arglist,M);
 
- #ifdef ENABLE_SPACEMIU  
-   
-    bool is_union= isUnionTy(AI->getAllocatedType());
-    Value * constisUnionTy= 
-            constructValueFromFunc(is_union, hook, 4); 
- 
-    pushtoarglist ( successorInst, 
-                    hook->getFunctionType()->getParamType(4) , 
-                    constisUnionTy, 
-                    arglist,M);
-
-  #endif
-
     CallInst * modifiedAI = CallInst::Create(hook, arglist, "");
+    
     //vector<Value*> castinglist;
     Instruction* restoredPtr= 
         castAndreplaceAllUsesWith (AI, modifiedAI);
     
     insertCastInstForArg (successorInst, arglist);
     modifiedAI->insertBefore(successorInst);
+    //insertCastToRestoreType(modifiedAI, castinglist); 
     if (restoredPtr != nullptr) {
         restoredPtr->insertAfter(modifiedAI); //
     }
     
-  //  insertEpilogueOfFunc (modifiedAI, M);
-
-  #ifdef ENABLE_SPACEMIU  
+    insertEpilogueOfFunc (modifiedAI, M);//, postDT);
     
-    insertLocalUnionsList (paddedAI, LocalUnions);
-  
-  #endif
-
     return AI;
 }
 
-Instruction* 
-Framer::doAllocaInst (AllocaInst* AI, 
-                              Instruction* successorInst,
-                            #ifdef ENABLE_SPACEMIU
-                              vector <AllocaInst*> & LocalUnions, 
-                            #endif
-                              Module & M) 
+Instruction* Framer::doAllocaInst (AllocaInst* AI, 
+                                        Instruction* successorInst, 
+                                        Module & M) //,
+                                        //PostDominatorTree & postDT)
 {
+    //errs()<<"FUNC: "<<AI->getFunction()->getName()<<", AI: "<<*AI<<"\n";
+/*    if (AI->getFunction()->getName().equals("BZ2_blockSort")) {
+        if (ArrayType * at= dyn_cast<ArrayType>(AI->getAllocatedType())) {    
+            uint64_t num= at->getNumElements();
+            IntegerType * elemty= dyn_cast<IntegerType>(at->getElementType());
+            assert(elemty!=nullptr); 
+            if (num==256 && elemty->getBitWidth()==32) {
+                errs()<<"skip BZ2_blockSort(256/32): "<<*AI<<"\n";    
+                return nullptr;
+            }
+        }
+    } */
     bool notDynamicArray= false;
 
     if (AI->use_empty()) {
         dbg(errs()<<"\tuse list empty. skipping..\n";)
         return nullptr;
     }
-     
+    
     Type * Ty = AI->getAllocatedType();
-    Instruction* ToBeRemoved= nullptr;
+    Instruction* ToBeRemoved=NULL;
 
     if (AI->isArrayAllocation() 
         || AI->getArraySize() != ConstantInt::get(AI->getArraySize()->getType(), 1)) 
        {
-  #ifdef ENABLE_TRACK_ARRAYS
         notDynamicArray= false;
-        
-        if (AI->getArraySize() != ConstantInt::get(AI->getArraySize()->getType(), 1)) {
-            errs()<<"This form may be -- a=alloca ty, elemNum. and Framer/SpaceMiu may be produce wrong hook args and new alloca. DO CHECK\n";
-            exit(0);
-        }
-        
-        ToBeRemoved= doArrayAllocaInst (AI, 
-                                        successorInst, 
-                                        notDynamicArray, 
-                                      #ifdef ENABLE_SPACEMIU
-                                        LocalUnions, 
-                                      #endif
-                                        M);
-  #endif 
+        ToBeRemoved= doArrayAllocaInst (AI, successorInst, notDynamicArray, M);//, postDT);
         return ToBeRemoved;
     }
-
     if (Ty->isFirstClassType()) { 
         
         if (Ty->isSingleValueType() ) {
@@ -1417,45 +1681,29 @@ Framer::doAllocaInst (AllocaInst* AI,
                 dbg(errs()<<"\tSKIP: non-pointer type.\n";)
                 return ToBeRemoved; 
             }
-
             else {
                 ;//doPrimitiveAllocaInst (AI, successorInst, M); 
                 // doing nothing right now for non-array allocation. 
             }
+        
         }
         else if (Ty->isAggregateType() ) {
-
+            
             if (Ty->isArrayTy()) {
-
-              #ifdef ENABLE_TRACK_ARRAYS            
                 notDynamicArray= true;
-                ToBeRemoved= 
-                    doArrayAllocaInst(AI, 
-                                      successorInst, 
-                                      notDynamicArray, 
-                                    #ifdef ENABLE_SPACEMIU
-                                      LocalUnions,
-                                    #endif
-                                      M);//, postDT);
+                ToBeRemoved= doArrayAllocaInst (AI, successorInst, notDynamicArray, M);//, postDT);
                 return ToBeRemoved;
-             
-              #endif
             }
-
-        #ifdef TRACK_STRUCT_ALSO 
-        
+#ifdef TRACK_STRUCT_ALSO 
             else if (Ty->isStructTy()) {
-                ToBeRemoved= doPrimitiveAllocaInst (AI, 
-                                                    successorInst, 
-                                                    LocalUnions, 
-                                                    M);
+                ToBeRemoved= doPrimitiveAllocaInst (AI, successorInst, M);
                 return ToBeRemoved; 
             }
             else {
                 errs()<<"Aggregated type allocated, but neither array nor struct. It is "<<*Ty<<"\nDo something here. \n";
                 exit(0);
             }
-       #endif
+#endif
         }
     }
     else {
@@ -1660,8 +1908,7 @@ Value* Framer::getAssignment(LoadInst * LI, DominatorTree & dt)
     return nullptr;
 
 }
-bool 
-Framer::checkSafeWithDomTree (Value * op, DominatorTree & dt) 
+bool Framer::checkSafeWithDomTree (Value * op, DominatorTree & dt) 
 {
     // op is cast-stripped ptr op of SI/LI
 
@@ -1681,12 +1928,12 @@ Framer::checkSafeWithDomTree (Value * op, DominatorTree & dt)
             exit(0);
         }   
         //  }
-    }
-    /*else if (PHINode * pn=dyn_cast<PHINode>(op)){
+}
+    else if (PHINode * pn=dyn_cast<PHINode>(op)){
         for (int i=0;i<pn->getNumIncomingValues();i++) {
             ; 
         }
-    } */
+    }
     else {
     }
     return false;
@@ -1815,195 +2062,14 @@ static void insertExitCall (Instruction * ins, Module & M)
     ci->insertBefore(ins);
 } 
 
-
-void
-Framer::doLoadInstForSpaceMiu (LoadInst * LI, 
-                            Instruction * sucIns, 
-                            DominatorTree & dt, 
-                            AAResults & AA,
-                            vector <AllocaInst*> & ais,
-                            Module &M)
-{
-  
-  Function * hook= nullptr;
-  vector<Value *> arglist;
-
-  bool justUntag= justToBeUntagged (LI->getPointerOperand(),
-                                    AA, ais, GVUnions, HeapUnions, 
-                                    AllTypeList, SafeCasts, M); 
-   
-  if (justUntag) {
-      hook= M.getFunction ("FRAMER_untag_ptr_2");
-
-      pushtoarglist(LI, 
-              hook->getFunctionType()->getParamType(0), 
-              LI->getPointerOperand(),     
-              arglist,M);
-  }
-  else {
-//      errs()<<"## LOAD has alias:: "<<*LI<<"\n";
-//      errs()<<"   --> do type check\n";
-        
-      //hook= M.getFunction ("FRAMER_type_update_at_memREAD");
-   errs()<<" FRAMER_type_check_at_memREAD!!! exiting. \n";
-   exit(0);
-
-      hook= M.getFunction ("FRAMER_type_check_at_memREAD");
-      
-      Type * ty= LI->getPointerOperand()->getType(); 
-        
-      short tid= getIdx(AllTypeList, ty);
-        
-      assert(tid >=0); 
-
-      Value * desttid= 
-          constructValueFromFunc (tid, hook, 1);
-        
-      pushtoarglist (sucIns, 
-                hook->getFunctionType()->getParamType(0), 
-                LI->getPointerOperand(), arglist,M);
-
-      pushtoarglist (sucIns, 
-                hook->getFunctionType()->getParamType(1), 
-                desttid, arglist,M);
-
-  } 
-
-  CallInst * modifiedPtr = CallInst::Create(hook, arglist, "");
-
-  insertCastInstForArg (LI, arglist); 
-  modifiedPtr->insertBefore(LI);
-  castAndreplaceUsesOfWithBeforeInst (LI, 
-          LI->getPointerOperand(), 
-          modifiedPtr);
-
-}
-
-
-/*  doLoadInstForSpaceMiu : enabled when SPACE Miu is on */
-/*
-void
-Framer::doLoadInstForSpaceMiu (LoadInst * LI, 
-                            Instruction * sucIns, 
-                            DominatorTree & dt, 
-                            AAResults & AA,
-                            vector <AllocaInst*> & ais,
-                            Module &M)
-{
-    Function * hook= nullptr;
-    vector<Value *> arglist;
-   
-    BitCastOperator * bitcastop= dyn_cast<BitCastOperator>(LI->getPointerOperand()); 
-    PointerType * ptrTy= nullptr;
-   
-    if (bitcastop) {
-        ptrTy= dyn_cast<PointerType>(bitcastop->getSrcTy());
-        assert(ptrTy!=nullptr);
-    }
- 
-  //  PointerType * ptrTy= dyn_cast<PointerType>(LI->getOperand(0)->getType());
-  //  assert(ptrTy!=nullptr);
-     
-    if( !bitcastop
-        || !isUnionTy(ptrTy->getElementType())  
-        || !isAliasWithUnionObj(LI->getOperand(0), AA, ais, GVUnions, M)) {
-
-        hook= M.getFunction ("FRAMER_untag_ptr");
-
-        pushtoarglist(LI, 
-                hook->getFunctionType()->getParamType(0), 
-                LI->getOperand(0),     
-                arglist,M);
-    }
-    else {
-        errs()<<"## LOAD has alias:: "<<*LI<<"\n";
-        errs()<<"  -> hook type check\n";
-         
-        hook= M.getFunction ("FRAMER_type_check_at_memREAD");
-
-        PointerType * desti= 
-            dyn_cast<PointerType>((LI->getOperand(0))->getType());
-        
-        assert(desti);
-           
-        short desttid= getIdx(AllTypeList, desti->getElementType());
-        
-        unsigned destTsize= 
-            Framer::getBitwidth(desti->getElementType())/8; 
-
-        assert(desttid >=0); 
-
-        // *****  
-
-        pushtoarglist (sucIns, 
-                hook->getFunctionType()->getParamType(0), 
-                LI->getOperand(0), arglist,M);
-
-        Value * dest= 
-            constructValueFromFunc (desttid, hook, 1);
-        pushtoarglist (sucIns, 
-                hook->getFunctionType()->getParamType(1), 
-                dest, arglist,M);
-
-        Value * constmaxtysperoff= 
-            constructValueFromFunc(maxtysperoff, hook, 2);
-        pushtoarglist (sucIns, 
-                hook->getFunctionType()->getParamType(2), 
-                constmaxtysperoff, arglist,M);
-
-        Value * constmaxoffsperty= 
-            constructValueFromFunc(maxoffsperty, hook, 3); 
-        pushtoarglist (sucIns, 
-                hook->getFunctionType()->getParamType(3), 
-                constmaxoffsperty, arglist,M);
-
-        Value * consttblentrysize= 
-            constructValueFromFunc(tblentrysize, hook, 4); 
-        pushtoarglist (sucIns, 
-                hook->getFunctionType()->getParamType(4), 
-                consttblentrysize, arglist,M);
-
-        Value * constdestTsize= 
-            constructValueFromFunc(destTsize, hook, 5); 
-        pushtoarglist (sucIns, 
-                hook->getFunctionType()->getParamType(5), 
-                constdestTsize, arglist,M);
-      
-      #ifndef RTTABLE_VERSION_1
-      
-        pushtoarglist (sucIns, 
-                hook->getFunctionType()->getParamType(6), 
-                constructValueFromFunc(MaxOffset, hook, 6), 
-                arglist,M);
-     
-      #endif
-
-        // add more args.
-    } 
-
-    CallInst * modifiedPtr = CallInst::Create(hook, arglist, "");
-
-    insertCastInstForArg (LI, arglist); 
-    modifiedPtr->insertBefore(LI);
-    castAndreplaceUsesOfWithBeforeInst (LI, 
-            LI->getOperand(0), 
-            modifiedPtr);
-}
-*/
-
-void 
-Framer::doLoadInst (LoadInst * LI, 
-                            Instruction * successorInst, 
-                            DominatorTree & dt, 
-                            AAResults & AA,
-                            Module &M)
+void Framer::doLoadInst (LoadInst * LI, Instruction * successorInst, DominatorTree & dt, Module &M)
 {
     tempload++; 
     Function * hook= nullptr; 
     vector<Value *> arglist;
 
 #ifdef STORE_ONLY_CHECK
-    hook= M.getFunction ("FRAMER_untag_ptr_2");
+    hook= M.getFunction ("FRAMER_supplementary_untag_ptr");
     pushtoarglist(LI, 
             hook->getFunctionType()->getParamType(0), 
             LI->getOperand(0),     
@@ -2017,13 +2083,13 @@ Framer::doLoadInst (LoadInst * LI,
     if (issafeaccess==SAFESTATICALLY) { 
         dbg(errs()<<" 1\n";)
         temploadsafe++;
-        hook= M.getFunction ("FRAMER_untag_ptr_2");
+        hook= M.getFunction ("FRAMER_supplementary_untag_ptr");
         pushtoarglist(LI, 
                       hook->getFunctionType()->getParamType(0), 
                       LI->getOperand(0),     
                       arglist,M);
     }
-  #ifndef DISABLE_CHEAP_CHECKS 
+#ifndef DISABLE_CHEAP_CHECKS 
     else if (issafeaccess==COMPAREIDXATRUNTIME) {
         dbg(errs()<<" 2\n";)
       // compare size and idx.  
@@ -2040,7 +2106,7 @@ Framer::doLoadInst (LoadInst * LI,
         assert(hook!=nullptr);
         insertCompareTypeHook(arglist, LI->getPointerOperand(), LI, hook, M); 
     }
-  #endif
+#endif
     else if (issafeaccess==COMPSIZEATRUNTIME) {
         dbg(errs()<<" 4\n";)
       // compare memaccess size and heap objsize.  
@@ -2058,18 +2124,16 @@ Framer::doLoadInst (LoadInst * LI,
         dbg(errs()<<" 6\n";)
         hook= M.getFunction ("FRAMER_forall_load");
         
-        unsigned typeSizeOfLoadedContent= 
-            Framer::getBitwidth(LI->getType())/8;
+        unsigned typeSizeOfLoadedContent= Framer::getBitwidth(LI->getType())/8;
         
-        assert (typeSizeOfLoadedContent!=0 
-                && "typeSizeOfLoadedContent is zero\n"); 
+        assert(typeSizeOfLoadedContent!=0 && "typeSizeOfLoadedContent is zero\n"); 
         
         Value * numBytesOfLoadedContent= 
             constructValueFromFunc (typeSizeOfLoadedContent, 
                                     hook, 
                                     1);
 
-        // here 'insertBeforeMe' is LoadInst itself, 
+        //here 'insertBeforeMe' is LoadInst itself, 
         // since hook call and bitcast should be inserted BEFORE LI for a relacement.
         pushtoarglist (LI, 
                 hook->getFunctionType()->getParamType(0), 
@@ -2145,7 +2209,7 @@ Value* Framer::tagFramerTyID (Value * val, //val: alloca or gv
             return false; 
         }
         Function * f= cast<Function>(ci->getCalledValue());
-        if (f->getName().startswith("FRAMER_untag_ptr")) {
+        if (f->getName().startswith("FRAMER_supplementary_untag_ptr")) {
             exit(0); 
         }
         else if (isHookFamilyFunction(f)) {
@@ -2161,72 +2225,6 @@ Value* Framer::tagFramerTyID (Value * val, //val: alloca or gv
     return istagged;
 }*/
 
-void
-Framer::doStoreInstForSpaceMiu (StoreInst * SI, 
-                            Instruction * sucIns, 
-                            DominatorTree & dt, 
-                            AAResults & AA,
-                            vector <AllocaInst*> & ais,
-                            Module &M)
-{
-//  errs()<<"\n##  STORE  ##############\n";
-  
-  Function * hook= nullptr;
-  vector<Value *> arglist;
-  Value * op= SI->getPointerOperand();
-  
-  StructType * unionty= 
-        isAliasWithUnionObj(op, 
-                            AA, ais, GVUnions, HeapUnions, M); 
-
-  // pointer operand is union-typed. 
-  
-  if (!unionty) {
- //     errs()<<"\t----> not union type. \n"; 
-   //   assert(isSafelyCastedTo (unionty, 
-   //                 cast<PointerType>(op->getType())->getElementType(), 
-   //                 AllTypeList, SafeCasts)); 
-      hook= M.getFunction ("FRAMER_untag_ptr_2");
-
-      pushtoarglist(SI, 
-              hook->getFunctionType()->getParamType(0), 
-              SI->getPointerOperand(),     
-              arglist,M);
-  }
-  else {
-//      errs()<<"\t---> alias:: "<<*SI<<"\n";
-//      errs()<<"\t---> update metadata.\n";
-        
-      hook= M.getFunction ("FRAMER_type_update_at_memWRITE");
-
-      Type * ty= SI->getValueOperand()->getType(); 
-         
-      short tid= getIdx(AllTypeList, ty);
-        
-      assert(tid >=0); 
-
-      Value * desttid= 
-          constructValueFromFunc (tid, hook, 1);
-        
-      pushtoarglist (sucIns, 
-                hook->getFunctionType()->getParamType(0), 
-                SI->getPointerOperand(), arglist,M);
-
-      pushtoarglist (sucIns, 
-                hook->getFunctionType()->getParamType(1), 
-                desttid, arglist,M);
-  } 
-
-  CallInst * modifiedPtr = CallInst::Create(hook, arglist, "");
-
-  insertCastInstForArg (SI, arglist); 
-  modifiedPtr->insertBefore(SI);
-  castAndreplaceUsesOfWithBeforeInst (SI, 
-          SI->getPointerOperand(), 
-          modifiedPtr);
-
-}
-
 void Framer::doStoreInst (StoreInst * SI, 
                           Instruction * successorInst, 
                           DominatorTree & dt, 
@@ -2240,8 +2238,7 @@ void Framer::doStoreInst (StoreInst * SI,
     Type * srcType = val->getType(); 
     unsigned srcFramerTyID= getFramerTypeID(srcType); 
     unsigned srcFramerTySize= Framer::getBitwidth(srcType)/8;
-    assert (srcFramerTySize!=0 
-            && "doStore. srcFramerTySize is zero\n");
+    assert(srcFramerTySize!=0 && "doStore. srcFramerTySize is zero\n");
 
 #ifdef TYPECHECK    
     // Tagging referencing 
@@ -2267,7 +2264,7 @@ void Framer::doStoreInst (StoreInst * SI,
     unsigned issafeaccess= isSafeAccess(SI->getPointerOperand(), M, 1, paddedGVs);
     if (issafeaccess==SAFESTATICALLY) {
         tempstoresafe++;
-        hook= M.getFunction ("FRAMER_untag_ptr_2");
+        hook= M.getFunction ("FRAMER_supplementary_untag_ptr");
 
         pushtoarglist(SI, 
                 hook->getFunctionType()->getParamType(0), 
@@ -2340,8 +2337,7 @@ void Framer::doStoreInst (StoreInst * SI,
     CallInst * modifiedPtr = CallInst::Create (hook, arglist, "");
     insertCastInstForArg (SI, arglist);
     modifiedPtr->insertBefore (SI);
-    castAndreplaceUsesOfWithBeforeInst(SI, 
-        SI->getPointerOperand(), modifiedPtr);
+    castAndreplaceUsesOfWithBeforeInst(SI, SI->getPointerOperand(), modifiedPtr);
 }
 
 
@@ -2575,9 +2571,7 @@ Value * Framer::castingArgToParam (Instruction * I, Type * paramType, Value * ar
 pushtoarglist does NOT insert castinst for arg. 
 just creating a castinst, and then pushing to arglist.
 */
-Instruction* 
-Framer::createCastInst (Value * val, 
-                    Type * Ty) //val (return):i8*->paramty
+Instruction* Framer::createCastInst (Value * val, Type * Ty) //val (return):i8*->paramty
 { 
     Instruction * mycast= nullptr;
 
@@ -3084,10 +3078,9 @@ Type* Framer::getResultTypeOfMalloc (CallInst * CI)
     return malloctype;
 }
 
-Instruction* 
-Framer::doCallInstMalloc (CallInst * CI, 
-                          Instruction * successorInst, 
-                          Module & M)
+Instruction* Framer::doCallInstMalloc (CallInst * CI, 
+                                            Instruction * successorInst, 
+                                            Module & M)
 {
     /* Replace malloc with wrapper function. */
     
@@ -3161,171 +3154,43 @@ Instruction* Framer::doCallInstFree(CallInst * CI,
     return CI;
 }
 
-void 
-Framer::doCallLLVMMemTransfer (CallInst * CI,
-                                Instruction * sucIns, 
-                                AAResults & AA,
-                              #ifdef ENABLE_SPACEMIU
-                                vector <AllocaInst*> & ais,
-                              #endif
-                                Module &M)
+
+void Framer::doCallLLVMMemTransfer (CallInst * CI,//MemTransferInst* MI, 
+                                    Instruction * successorInst, 
+                                    Module &M)
 {
-  // (Src, Dest, numBytesToCopy, alignment, isVolatile )    
-  
-  dbg(errs()<<"MEM Trasnfer\n";) 
-    
-  Function * hook= nullptr;
-    
-  Value * destAddress= nullptr;
-  Value * srcAddress= nullptr;
-  Value * numBytesToCopy= nullptr;
-  Value * numAlign= nullptr;
-  Value * isVolatile= nullptr; 
-
-  if (MemTransferInst * MI = dyn_cast<MemTransferInst>(CI)){
-    destAddress     = MI->getRawDest();
-    srcAddress      = MI->getRawSource();
-    numBytesToCopy  = MI->getLength();
-    numAlign        = MI->getAlignmentCst();
-    isVolatile      = MI->getVolatileCst(); 
-  }
-  else {
-    errs()<<"Memtransfer. it ever enters here?\n";
-    exit(0);
-
-    destAddress=    CI->getArgOperand(0); 
-    srcAddress=     CI->getArgOperand(1);  
-    numBytesToCopy= CI->getArgOperand(2); 
-    numAlign=       CI->getArgOperand(3);  
-    isVolatile=     CI->getArgOperand(4); 
-  }
-
-  vector<Value *> dest_arglist;
-  vector<Value *> src_arglist;
-     
-#ifdef ENABLE_SPACEMIU
-  
-    hook= M.getFunction ("FRAMER_type_update_at_memWRITE");
-   
-    Function * hook_untag= M.getFunction("FRAMER_untag_ptr_2");
-     
-    if(!isAliasWithUnionObj(destAddress, AA, ais, GVUnions, HeapUnions, M)) {
-     
-      // handle dest
-       
-      pushtoarglist(CI, 
-                hook_untag->getFunctionType()->getParamType(0), 
-                destAddress,     
-                dest_arglist,
-                M);
-      
-      // handle src
-
-      pushtoarglist(CI, 
-                hook_untag->getFunctionType()->getParamType(0), 
-                srcAddress,     
-                src_arglist,
-                M);
-
-    // handle dest ptr
-
-    CallInst* destModifiedPtr= CallInst::Create (hook_untag, dest_arglist, "");
-    insertCastInstForArg (CI, dest_arglist);
-    destModifiedPtr->insertBefore (CI);
-    castAndreplaceUsesOfWithBeforeInst (CI, 
-            destAddress, 
-            destModifiedPtr);
-
-    // handle src ptr
-    
-    CallInst* srcModifiedPtr= CallInst::Create (hook_untag, src_arglist, "");
-    insertCastInstForArg (CI, src_arglist);
-    srcModifiedPtr->insertBefore (CI);
-    castAndreplaceUsesOfWithBeforeInst (CI, 
-            srcAddress, 
-            srcModifiedPtr);
-
-    }
-    else {
-      errs()<<"## memtransfer has alias:: "<<*CI<<"\n";
-        
-      hook= M.getFunction ("FRAMER_type_update_at_memWRITE");
-
-    ////
-    
-      Type * origty= destAddress->getType(); 
-    
-      if (isa<BitCastOperator>(destAddress)) {
-        origty= cast<BitCastOperator>(destAddress)->getSrcTy();
-      }
-      else if (isa<GEPOperator>(destAddress)) {
-        origty= cast<GEPOperator>(destAddress)->getPointerOperand()->getType();  
-      }
-      else {
-        errs()<<"Memtransfer another ty: "<<*destAddress<<".. Exiting..\n";
-        exit(0);
-      }
-    ////
-
-      PointerType * pty= dyn_cast<PointerType>(origty); 
-      assert(pty);
-       
-      short tid= getIdx(AllTypeList, pty->getElementType());
-        
-      assert(tid >=0); 
-
-      Value * desttid= 
-            constructValueFromFunc (tid, hook, 1);
-      
-      // handle dest ptr 
-       
-      pushtoarglist (CI, 
-                hook->getFunctionType()->getParamType(0), 
-                destAddress, 
-                dest_arglist,M);
-
-      pushtoarglist (CI, 
-                hook->getFunctionType()->getParamType(1), 
-                desttid, 
-                dest_arglist,
-                M);
-
-      // handle src ptr  
-      
-      pushtoarglist(CI, 
-                hook_untag->getFunctionType()->getParamType(0), 
-                srcAddress,     
-                src_arglist,
-                M);
-  
-  // handle dest ptr
-
-    CallInst* destModifiedPtr= CallInst::Create (hook, dest_arglist, "");
-    insertCastInstForArg (CI, dest_arglist);
-    destModifiedPtr->insertBefore (CI);
-    castAndreplaceUsesOfWithBeforeInst (CI, 
-            destAddress, 
-            destModifiedPtr);
-
-    // handle src ptr
-    
-    CallInst* srcModifiedPtr= CallInst::Create (hook_untag, src_arglist, "");
-    insertCastInstForArg (CI, src_arglist);
-    srcModifiedPtr->insertBefore (CI);
-    castAndreplaceUsesOfWithBeforeInst (CI, 
-            srcAddress, 
-            srcModifiedPtr);
- 
-  } 
-      
-#else   
-    hook= M.getFunction ("FRAMER_forall_call_llvm_memtransfer");
+    // (Src, Dest, numBytesToCopy, alignment, isVolatile )    
+    dbg(errs()<<"MEM Trasnfer\n";) 
+    Function * hook = M.getFunction ("FRAMER_forall_call_llvm_memtransfer");
+    //Function * hook_for_src = M.getFunction ("FRAMER_supplementary_untag_ptr");
     
     assert(hook!=nullptr && 
             "memTransfer hook funcion is empty\n");
     
-    // handle dest ptr
-       
+    Value * destAddress;
+    Value * srcAddress;
+    Value * numBytesToCopy;
+    Value * numAlign;
+    Value * isVolatile; 
+
+    if (MemTransferInst * MI = dyn_cast<MemTransferInst>(CI)){
+        destAddress     = MI->getRawDest();
+        srcAddress      = MI->getRawSource();
+        numBytesToCopy  = MI->getLength();
+        numAlign        = MI->getAlignmentCst();
+        isVolatile      = MI->getVolatileCst(); 
+    }
+    else {
+        destAddress=    CI->getArgOperand(0); 
+        srcAddress=     CI->getArgOperand(1);  
+        numBytesToCopy= CI->getArgOperand(2); 
+        numAlign=       CI->getArgOperand(3);  
+        isVolatile=     CI->getArgOperand(4); 
+    }
+
+    vector<Value *> dest_arglist;
+    vector<Value *> src_arglist;
+    
     pushtoarglist (CI, 
                     hook->getFunctionType()->getParamType(0), 
                     destAddress,   
@@ -3344,8 +3209,13 @@ Framer::doCallLLVMMemTransfer (CallInst * CI,
                     isVolatile,    
                     dest_arglist,M);
 
-    // handle src ptr
-    
+    CallInst* destModifiedPtr= CallInst::Create (hook, dest_arglist, "");
+    insertCastInstForArg (CI, dest_arglist);
+    destModifiedPtr->insertBefore (CI);
+    castAndreplaceUsesOfWithBeforeInst (CI, 
+                                        destAddress, 
+                                        destModifiedPtr);
+
     pushtoarglist (CI, 
             hook->getFunctionType()->getParamType(0), 
             srcAddress,    
@@ -3363,49 +3233,25 @@ Framer::doCallLLVMMemTransfer (CallInst * CI,
             isVolatile,    
             src_arglist,M);
 
-
-    // handle dest ptr
-
-    CallInst* destModifiedPtr= CallInst::Create (hook, dest_arglist, "");
-    insertCastInstForArg (CI, dest_arglist);
-    destModifiedPtr->insertBefore (CI);
-    castAndreplaceUsesOfWithBeforeInst (CI, 
-            destAddress, 
-            destModifiedPtr);
-
-    // handle src ptr
-    
     CallInst* srcModifiedPtr= CallInst::Create (hook, src_arglist, "");
     insertCastInstForArg (CI, src_arglist);
     srcModifiedPtr->insertBefore (CI);
     castAndreplaceUsesOfWithBeforeInst (CI, 
-            srcAddress, 
-            srcModifiedPtr);
-
-#endif
+                                        srcAddress, 
+                                        srcModifiedPtr);
 }
 
-void 
-Framer::doCallLLVMMemSet (CallInst * MSI, 
-                          Instruction * successorInst, 
-                          Module &M)
+void Framer::doCallLLVMMemSet (CallInst * MSI, Instruction * successorInst, Module &M)
 {
     /* (Src, Dest, numBytesToCopy, alignment, isVolatile )*/    
     dbg(errs()<<"MEM SET\n";) 
-    
-    Function * hook= nullptr; 
-    
+    Function * hook = M.getFunction ("FRAMER_forall_call_llvm_memset");
+
     Value * destAddress; 
     Value * val;            
     Value * numBytesToCopy; 
     Value * numAlign;
     Value * isVolatile;      
-    
-    vector<Value *> arglist;
-    
-#ifndef ENABLE_SPACEMIU 
-
-    hook = M.getFunction ("FRAMER_forall_call_llvm_memset");
 
     if (MemSetInst * MI = dyn_cast<MemSetInst>(MSI)){
         destAddress     = MI->getRawDest();
@@ -3421,49 +3267,22 @@ Framer::doCallLLVMMemSet (CallInst * MSI,
         numAlign=       MSI->getArgOperand(3);  
         isVolatile=     MSI->getArgOperand(4); 
     }
+    vector<Value *> arglist;
     
-    pushtoarglist (MSI, 
-                   hook->getFunctionType()->getParamType(0), 
-                   destAddress, arglist, M);
-    pushtoarglist (MSI, hook->getFunctionType()->getParamType(1), 
-                   val, arglist,M);
-    pushtoarglist (MSI, hook->getFunctionType()->getParamType(2), 
-                   numBytesToCopy,arglist,M);
-    pushtoarglist (MSI, hook->getFunctionType()->getParamType(3), 
-                   numAlign, arglist,M);
-    pushtoarglist (MSI, hook->getFunctionType()->getParamType(4), 
-                   isVolatile, arglist,M);
-    
-#else
-    
-    if (MemSetInst * MI = dyn_cast<MemSetInst>(MSI)){
-     
-    hook=  M.getFunction("FRAMER_untag_ptr_2"); 
-    
-    destAddress  = MI->getRawDest();
-     
-    pushtoarglist (MI, 
-                   hook->getFunctionType()->getParamType(0), 
-                   destAddress, arglist, M);
-    }
-    else {
-        errs()<<"wtf is this?\n";
-        exit(0);    
-    }
-#endif
+    pushtoarglist (MSI, hook->getFunctionType()->getParamType(0) , destAddress,   arglist,M);
+    pushtoarglist (MSI, hook->getFunctionType()->getParamType(1) , val,           arglist,M);
+    pushtoarglist (MSI, hook->getFunctionType()->getParamType(2) , numBytesToCopy,arglist,M);
+    pushtoarglist (MSI, hook->getFunctionType()->getParamType(3) , numAlign,      arglist,M);
+    pushtoarglist (MSI, hook->getFunctionType()->getParamType(4) , isVolatile,    arglist,M);
     
     CallInst * modifiedPtr = CallInst::Create (hook, arglist, "");
     insertCastInstForArg (MSI, arglist);
     modifiedPtr->insertBefore (MSI);
     castAndreplaceUsesOfWithBeforeInst (MSI, destAddress, modifiedPtr);
+
 }
-
 //perlbench
-void Framer::doCallstrlentemp(
-                        CallInst *CI,
-                        Instruction *successorInst, 
-                        Module &M) {
-
+void Framer::doCallstrlentemp(CallInst *CI,Instruction *successorInst, Module &M) {
     Function *hook= M.getFunction ("FRAMER_forall_call_strlentemp");
     assert(hook!=nullptr && "FRAMER_forall_call_strlentemp is null.\n");
 
@@ -3515,7 +3334,7 @@ void Framer::doCallstrchr(CallInst *CI,Instruction *successorInst, Module &M) {
 void Framer::doCallstrcpy(CallInst * CI, Instruction * successorInst, Module &M) 
 {
     Function * hook = M.getFunction ("FRAMER_forall_call_strcpy");
-    Function * hooksrc = M.getFunction ("FRAMER_untag_ptr_2");
+    Function * hooksrc = M.getFunction ("FRAMER_supplementary_untag_ptr");
     assert(hook!=nullptr && "strcpy hook func is null.\n");
     
     Value * dest=CI->getArgOperand(0); 
@@ -3625,7 +3444,7 @@ void Framer::doCallstrn___ (CallInst * CI, Instruction * successorInst, Module &
 }
 void Framer::handleArgAttr (CallInst * CI, Module & M)
 {
-    Function * hook=  M.getFunction ("FRAMER_untag_ptr_2");
+    Function * hook=  M.getFunction ("FRAMER_supplementary_untag_ptr");
     assert(isa<Function>(CI->getCalledValue()) && 
             "handleArgAttr's calledval is not function! do something..\n");
     
@@ -3693,14 +3512,14 @@ void Framer::doCallmem___ (CallInst * CI, Instruction * successorInst, Module &M
 void Framer::doCallExternalFunc (CallInst * CI, Instruction * successorInst, Module &M)
 {
     dbg(errs()<<"entered external\n";)
-    
-    Function * hook     = M.getFunction ("FRAMER_untag_ptr_2");
+    //errs()<<"F:: "<<CI->getFunction()->getName()<<"\n"; 
+    //errs()<<"  "<<*CI<<"\n"; 
+    Function * hook     = M.getFunction ("FRAMER_supplementary_untag_ptr");
 
     for (unsigned i = 0 ; i < CI->getNumArgOperands (); i++) {
         Value * From =CI->getArgOperand(i); 
 
-        if (! (From->getType()->isPointerTy()
-            || From->getType()->isAggregateType())) {
+        if (!(From->getType()->isPointerTy()||From->getType()->isAggregateType())) {
             dbg(errs()<<"\tNeither Pointer nor aggregated. Skipping..\n";)
             continue;
         }
@@ -3728,57 +3547,18 @@ void Framer::doCallExternalFunc (CallInst * CI, Instruction * successorInst, Mod
     dbg(errs()<<"new CI: "<<*CI<<"\n";)
 }
 
-
-
 //DISASTER!!! REWRITE LATER
-Instruction* 
-Framer::doCallInst (CallInst * CI, 
-                    Instruction * successorInst,
-                    AAResults & AA,
-                 #ifdef ENABLE_SPACEMIU
-                    vector <AllocaInst*> & LocalUnions,
-                 #endif
-                    Module &M)
+Instruction* Framer::doCallInst (CallInst * CI, Instruction * successorInst, Module &M)
 {
-    Value * calledValue= CI->getCalledValue()->stripPointerCasts();
+    Value * calledValue=CI->getCalledValue()->stripPointerCasts();
     Instruction * toBeRemoved = NULL;
 
- #ifdef ENABLE_SPACEMIU
- 
-    handleHeapUnions(CI, HeapUnions);
-
- #endif
-
-    
     if (Function * calledfunc = dyn_cast<Function>(calledValue))  { 
-       
-       //// interposed malloc function seemed replaced. so filter it out.
         
-        if (calledfunc->getName().startswith("FRAMER")) {
-            return nullptr; 
-        }
-    // If function pointer (particular for gcc)     
-        if (calledfunc == M.getFunction("_obstack_begin")
-            ) {
-            dbg(errs()<<"### CI 1: "<<*CI<<"\n";
-            errs()<<"    in func: "<<CI->getParent()->getParent()->getName()<<"\n"; 
-            )
-            CI->setArgOperand(3, M.getFunction("FRAMER_xmalloc")); 
-            CI->setArgOperand(4, M.getFunction("FRAMER_xfree")); 
-            dbg(errs()<<"### changed: "<<*CI<<"\n";)
-        }
-
-        if (calledfunc == M.getFunction("_obstack_newchunk")) {
-           ; 
-        }
         if (calledValue == M.getFunction(StringRef("malloc")) ||
             calledValue == M.getFunction(StringRef("free")) ||
             calledValue == M.getFunction(StringRef("realloc")) ||
             calledValue == M.getFunction(StringRef("calloc")) || 
-            calledValue == M.getFunction(StringRef("FRAMER_malloc")) ||
-            calledValue == M.getFunction(StringRef("FRAMER_free")) ||
-            calledValue == M.getFunction(StringRef("FRAMER_realloc")) ||
-            calledValue == M.getFunction(StringRef("FRAMER_calloc")) || 
             calledValue == M.getFunction(StringRef("strcmp")) || 
             calledValue == M.getFunction(StringRef("strncmp")) || 
             calledValue == M.getFunction(StringRef("strncpy")) || 
@@ -3795,13 +3575,7 @@ Framer::doCallInst (CallInst * CI,
         }
         else if (calledfunc->getName().startswith("llvm.memcpy") 
             || calledfunc->getName().startswith("llvm.memmove")) {
-            
-            doCallLLVMMemTransfer (CI, successorInst, AA, 
-                                #ifdef ENABLE_SPACEMIU
-                                  LocalUnions, 
-                                #endif
-                                  M);
-          
+            doCallLLVMMemTransfer (CI, successorInst, M);
         }
         else if (calledfunc->getName().startswith("llvm.memset")) {
             doCallLLVMMemSet (CI, successorInst, M);
@@ -3871,19 +3645,10 @@ Framer::doCallInst (CallInst * CI,
             Function * calledfunc= dyn_cast<Function>(getfunc);
             if (!calledfunc)  return NULL;
 
-            if (calledfunc == M.getFunction("_obstack_begin")) {
-                errs()<<"### CI 2: "<<*CI<<"\n";
-                errs()<<"    in func: "<<CI->getParent()->getParent()->getName()<<"\n";
-            }
-
             if (calledfunc == M.getFunction(StringRef("malloc")) ||
                 calledfunc == M.getFunction(StringRef("free")) ||
                 calledValue == M.getFunction(StringRef("realloc")) ||
                 calledValue == M.getFunction(StringRef("calloc")) || 
-                calledValue == M.getFunction(StringRef("FRAMER_malloc")) ||
-                calledValue == M.getFunction(StringRef("FRAMER_free")) ||
-                calledValue == M.getFunction(StringRef("FRAMER_realloc")) ||
-                calledValue == M.getFunction(StringRef("FRAMER_calloc")) || 
                 calledValue == M.getFunction(StringRef("strcmp")) || 
                 calledValue == M.getFunction(StringRef("strncmp")) || 
                 calledValue == M.getFunction(StringRef("strncpy")) || 
@@ -3897,11 +3662,7 @@ Framer::doCallInst (CallInst * CI,
             }
             else if (calledfunc->getName().startswith("llvm.memcpy") 
                     || calledfunc->getName().startswith("llvm.memmove")) {
-                doCallLLVMMemTransfer (CI, successorInst, AA, 
-                                     #ifdef ENABLE_SPACEMIU
-                                       LocalUnions, 
-                                     #endif  
-                                       M);
+                doCallLLVMMemTransfer (CI, successorInst, M);
             }
             else if (calledfunc->getName().startswith("llvm.memset")) {
                 doCallLLVMMemSet (CI, successorInst, M);
@@ -3931,8 +3692,7 @@ Framer::doCallInst (CallInst * CI,
 
     else if (isa<Argument>(calledValue)) {
         // THIS is only for running perlbench. CPU 2006.
-       
-
+        
         if (CI->getParent()->getParent()->getName().equals("perl_parse")
             || CI->getParent()->getParent()->getName().equals("S_parse_body")
             || CI->getParent()->getParent()->getName().equals("S_qsortsvu")){
@@ -3982,11 +3742,7 @@ Framer::doCallInst (CallInst * CI,
     }
     else if (MemTransferInst * MCI = dyn_cast<MemTransferInst>(CI) ) {
         if (HookDefForCalledFuncExists[LLVMMemTransferIsCalled]) {
-            doCallLLVMMemTransfer (MCI, successorInst, AA, 
-                                 #ifdef ENABLE_SPACEMIU
-                                   LocalUnions, 
-                                 #endif
-                                   M);
+            doCallLLVMMemTransfer (MCI, successorInst, M);
         }
     }    
     else if (MemSetInst * MSI = dyn_cast<MemSetInst>(CI) ) {
@@ -4005,168 +3761,48 @@ Framer::doCallInst (CallInst * CI,
     return toBeRemoved;
 }
 
-#ifdef ENABLE_SPACEMIU
-
-void 
-Framer::doBitCastInst (BitCastInst * BCI, 
-                       Instruction * sucIns,
-                       AAResults & AA,
-                       vector <AllocaInst*> & ais, 
-                       Module & M)
+void Framer::doBitCastInst (BitCastInst * BCI, Instruction * successorInst, Module &M)
 {
-    
-    PointerType * destptr= dyn_cast<PointerType>(BCI->getDestTy()); 
-    PointerType * srcptr= dyn_cast<PointerType>(BCI->getSrcTy());
-    
-    //assert(destptr && srcptr);
-
-    /* checking only pointer casts */
-    
-    if (!destptr || !srcptr) return;  
-    
-    dbg(errs()<<"\nBitcast SRC: "<<*BCI->getOperand(0)<<", DEST Ty: "<<*BCI->getDestTy()<<"\n";
-    ) 
-    /// what if it's union type?  
-    /// 1. src is union type && the pointer is allocation with the same union type.
-    /// 2. src is union type && the pointer is not allocation
-    /// union type cast checking first or downcast? 
-   
-     
-    if (isUnionTy(srcptr->getElementType()) 
-        && isAliasWithUnionObj(BCI->getOperand(0), AA, ais, GVUnions, HeapUnions, M)
-        && isSafeCastofUnionTy(srcptr->getElementType(), 
-                              destptr->getElementType(),
-                              &M.getDataLayout())) {
+    if (isa<PointerType>(BCI->getDestTy())
+        && isa<PointerType>(BCI->getSrcTy())) {
+        PointerType * destpt= cast<PointerType>(BCI->getDestTy()); 
+        PointerType * srcpt= cast<PointerType>(BCI->getSrcTy());
          
-//        errs()<<" ---> skipping\n"; 
-        return;     
+        if(destpt->getElementType()->isVectorTy() 
+            && isa<Constant>(BCI->getOperand(0)->stripPointerCasts())) {
+            errs()<<"\nBCI' dest elemty: "<<*destpt->getElementType()<<"\n";
+            errs()<<"BCI's src elemTy: "<<*srcpt->getElementType()<<"\n";
+            errs()<<"BitCast: "<<*BCI<<"\n"; 
+        }
     }
 
-  #ifndef ENABLE_FUNCTION_POINTER   
-    if ((srcptr->getElementType())->isFunctionTy()
-        || (destptr->getElementType())->isFunctionTy()) {
-        
-        dbg(errs()<<"Bitcast function pointer cast. Skip..\n";)
-        return;
-    }
-  #endif
- 
-    if (!isDownCast (srcptr, destptr, 
-                    AllTypeList, DownCasts)) {
-        
-  dbg(
-      if (!isSafelyCastedTo (srcptr->getElementType(), 
-                               destptr->getElementType(), 
-                               AllTypeList, SafeCasts)) {
-            errs()<<"  ---> Neither upcast nor downcast.\n";
-      } 
-      errs()<<"  ----> NOT downcast\n";
-    )
-      return; 
-    }
-    dbg(errs()<<"  ----> Downcast\n";)
-
-dbg(
-   if(destpt->getElementType()->isVectorTy() 
-        && isa<Constant>(BCI->getOperand(0)->stripPointerCasts())) {
-        errs()<<"\nBCI' dest elemty: "<<*destpt->getElementType()<<"\n";
-        errs()<<"BCI's src elemTy: "<<*srcpt->getElementType()<<"\n";
-        errs()<<"BitCast: "<<*BCI<<"\n"; 
-    } 
-)
 
     ///////////
+
     Function * hook = M.getFunction("FRAMER_forall_bitcast");
     
-    short desttid= getIdx(AllTypeList,
-                          destptr->getElementType());
+    Type * srcType      = BCI->getSrcTy();
+    Type * destType     = BCI->getDestTy();
     
-    assert(desttid >=0); 
-     
-    unsigned destTsize= 
-        Framer::getBitwidth(destptr->getElementType())/8; 
+    assert (srcType->isFirstClassType() && destType->isFirstClassType() && "Both source and destination types must be a first class type.\n");
     
-    bool isunion= isUnionTy(destptr->getElementType());
-        
-//// voronoi debuggin
-    
-dbg(    errs()<<"## bci: "<<*BCI<<" ( "<<BCI->getFunction()->getName()<<" )\n";
-    errs()<<"  src:"<<getIdx(AllTypeList,srcptr->getElementType())<<", ";  
-    errs()<<*srcptr->getElementType()<<"\n";
-    errs()<<"  dest: "<<desttid<<", ";
-    errs()<<*destptr->getElementType()<<"\n";
-)
-////////
-
-
-    
+    Value * srcTypeID   = constructValueFromFunc (srcType->getTypeID(),     hook, 0);
+    Value * destTypeID  = constructValueFromFunc (destType->getTypeID(),    hook, 1);
+    Value * numBytesOfTy= constructValueFromFunc ((Framer::getBitwidth(destType)/8),hook, 2);
+    assert(Framer::getBitwidth(destType)!=0 && "Framer::getBitwidth(destType) is zero\n"); 
     vector<Value *> arglist;
     
-    pushtoarglist (sucIns, 
-        hook->getFunctionType()->getParamType(0), 
-        BCI->getOperand(0), arglist,M);
-    
-    Value * dest= 
-            constructValueFromFunc (desttid, hook, 1);
-    pushtoarglist (sucIns, 
-        hook->getFunctionType()->getParamType(1), 
-        dest, arglist,M);
-    
-    Value * constisUnionTy= 
-            constructValueFromFunc(isunion, hook, 2); 
-    pushtoarglist (sucIns, 
-        hook->getFunctionType()->getParamType(2), 
-        constisUnionTy, arglist,M);
-    
-    Value * constdestTsize= 
-            constructValueFromFunc(destTsize, hook, 3); 
-    pushtoarglist (sucIns, 
-        hook->getFunctionType()->getParamType(3), 
-        constdestTsize, arglist,M);
- 
- #ifdef RTTABLE_VERSION_1    
-    Value * constmaxtysperoff= 
-            constructValueFromFunc(maxtysperoff, hook, 4); 
-    pushtoarglist (sucIns, 
-        hook->getFunctionType()->getParamType(4), 
-        constmaxtysperoff, arglist,M);
- 
-    Value * constmaxoffsperty= 
-            constructValueFromFunc(maxoffsperty, hook, 5); 
-    pushtoarglist (sucIns, 
-        hook->getFunctionType()->getParamType(5), 
-        constmaxoffsperty, arglist,M);
-    
-    Value * consttblentrysize= 
-            constructValueFromFunc(tblentrysize, hook, 6); 
-    pushtoarglist (sucIns, 
-        hook->getFunctionType()->getParamType(6), 
-        consttblentrysize, arglist,M);
-
- #else    
-    
-    pushtoarglist (sucIns, 
-        hook->getFunctionType()->getParamType(4), 
-        constructValueFromFunc(MaxOffset, hook, 4), 
-        arglist,M);
-    pushtoarglist (sucIns, 
-        hook->getFunctionType()->getParamType(5), 
-        constructValueFromFunc(max_upcasts, hook, 5), 
-        arglist,M);
-
-  #endif
-     
-     //TODO set type table row/column count as a global on pass code, and pass them to the hook as a constant arg\n");
-     
-    CallInst * modified= CallInst::Create(hook, arglist, "");
-    insertCastInstForArg (sucIns, arglist);
-    modified->insertBefore(sucIns);
+    pushtoarglist (successorInst, hook->getFunctionType()->getParamType(0), srcTypeID ,     arglist,M);
+    pushtoarglist (successorInst, hook->getFunctionType()->getParamType(1), destTypeID,     arglist,M);
+    pushtoarglist (successorInst, hook->getFunctionType()->getParamType(2), numBytesOfTy,   arglist,M);
+    //pushtoarglist (successorInst, hook->getFunctionType()->getParamType(3), BCI,            arglist);
+  
+    CallInst * modified = CallInst::Create(hook, arglist, "");
+    insertCastInstForArg (successorInst, arglist);
+    modified->insertBefore(successorInst);
 }
 
-#endif
-
-uint64_t  
-Framer::getArraySizeforGV (Type * allocatedObjTy) 
+uint64_t  Framer::getArraySizeforGV (Type * allocatedObjTy) 
 {
     if (ArrayType * arr = dyn_cast<ArrayType>(allocatedObjTy)){
         uint64_t size = arr->getNumElements();
@@ -4182,10 +3818,10 @@ bool Framer::isToBeTaggedType (Type* t)
     bool isToBeTagged = 0;
 
     if ( 
-      #ifdef TRACK_STRUCT_ALSO
+#ifdef TRACK_STRUCT_ALSO
         t->isVectorTy() || 
         t->isStructTy()||
-      #endif
+#endif
         t->isArrayTy()){ 
          isToBeTagged = 1;
     }
@@ -4611,10 +4247,9 @@ Constant* Framer::getOffset (Constant* base, Module & M)
     return ConstantExpr::getAnd(base, getOffsetMask);
 }
 
-Constant* 
-Framer::getTaggedConstantPtr( GlobalVariable* basePadded,
-                                      Constant* origPtr,
-                                      Module & M)
+Constant* Framer::getTaggedConstantPtr( GlobalVariable* basePadded,
+                                        Constant* origPtr,
+                                        Module & M)
 {
     
     Constant* basePaddedInt= ConstantExpr::getPointerCast(basePadded,
@@ -4660,24 +4295,13 @@ Framer::getTaggedConstantPtr( GlobalVariable* basePadded,
     // then what should be changed to avoid duplicate updates?  
 }*/
 
-Constant* 
-Framer::createHeaderInitializer (GlobalVariable* GV,
-                                         unsigned Tid,
-                                         unsigned numElems,
-                                         unsigned numBytesOfElemTy)
-                                         //unsigned gvsize)
+Constant* Framer::createHeaderInitializer (GlobalVariable* GV,
+                                           unsigned Tid,
+                                           unsigned gvsize)
 {
-    vector<Constant*> fields= 
-        {ConstantInt::get(HeaderTy->getElementType(0), Tid, true), 
-         ConstantInt::get(HeaderTy->getElementType(1), numElems*numBytesOfElemTy, true), 
-      #ifdef ENABLE_SPACEMIU
-         ConstantInt::get(HeaderTy->getElementType(2), numBytesOfElemTy, true), 
-         Constant::getNullValue(HeaderTy->getElementType(3)),
-         Constant::getNullValue(HeaderTy->getElementType(4))};
-      #else
-         Constant::getNullValue(HeaderTy->getElementType(2))};
-      #endif
-
+    vector<Constant*> fields= { ConstantInt::get(HeaderTy->getElementType(0), Tid, true), 
+                                ConstantInt::get(HeaderTy->getElementType(1), gvsize, true), 
+                                Constant::getNullValue(HeaderTy->getElementType(2)) };
     return ConstantStruct::get(HeaderTy, fields);
 }
 
@@ -4700,13 +4324,12 @@ Framer::createGVHoldingTag (Constant * origGV,
     return gvTag;                        
 }
 
-GlobalVariable* 
-Framer::doGlobalVariable (GlobalVariable * GV, 
-                                  Function * F, 
-                                  Instruction * insertBeforeMe, 
-                                  Module & M,
-                                  //set<pair<GlobalVariable*, Constant*>> & inits)
-                                  set<tuple<GlobalVariable*, Constant*, Constant*>> & inits)
+GlobalVariable* Framer::doGlobalVariable (GlobalVariable * GV, 
+                                    Function * F, 
+                                    Instruction * insertBeforeMe, 
+                                    Module & M,
+                                    //set<pair<GlobalVariable*, Constant*>> & inits)
+                                    set<tuple<GlobalVariable*, Constant*, Constant*>> & inits)
 {
     /*  Hook sig: void * FRAMER_global_variable 
         (void * gv, enum BASICType assignedTy, uint64_t numElems, unsigned numBytes) where
@@ -4727,44 +4350,27 @@ Framer::doGlobalVariable (GlobalVariable * GV,
                                         //debug later..
         return nullptr; 
     }
-    //unsigned FramerTyID;
-    int FramerTyID= 0;
-    unsigned numElems= 0;
-    unsigned numBytesOfElemTy= 0;
+    unsigned FramerTyID;
+    unsigned numElems;
+    unsigned numBytesOfElemTy;
 
     Type * assignedObjTy = 
         cast<PointerType>(GV->getType())->getElementType();
     Type* mytype=nullptr;
 
-  #ifndef TRACK_STRUCT_ALSO
+#ifndef TRACK_STRUCT_ALSO
     /* if global object is struct typed, skip hooking it. */ 
-    if (isa<StructType>(assignedObjTy)) return nullptr;
-  #endif     
-   
-  #ifndef ENABLE_TRACK_ARRAYS 
-    if (isa<ArrayType>(assignedObjTy)) return nullptr; 
-  #endif
-
-////
-//seg fault! We currently skip padding/tagging this ..
-
-  if (GV->getName().startswith("PL_sv_undef")) { 
-      //-----> 
-    return nullptr;
-  }
-////  
+    if (StructType* st=dyn_cast<StructType>(assignedObjTy)) return nullptr;
+#endif     
+    
     if (ArrayType * arr = dyn_cast<ArrayType>(assignedObjTy)) {
         numElems = arr->getNumElements();
         Type* elemTyOfArray = arr->getElementType();
         mytype= PointerType::get(elemTyOfArray, GV->getType()->getPointerAddressSpace());
         dbg(errs()<<"mytype: "<<*mytype<<"\n";) 
-        
         numBytesOfElemTy = (Framer::getBitwidth (elemTyOfArray))/8;
         assert(numBytesOfElemTy!=0 &&"numBytesOfElemTy is zero\n");
-        
-        unsigned temptid= getFramerTypeID(elemTyOfArray);
-        FramerTyID = (int)temptid;
-        assert(temptid==((int)FramerTyID));
+        FramerTyID = getFramerTypeID(elemTyOfArray);
     }
     else if (StructType* st=dyn_cast<StructType>(assignedObjTy)){
         if (st->isOpaque()) {
@@ -4775,11 +4381,7 @@ Framer::doGlobalVariable (GlobalVariable * GV,
         numElems= 1;
         numBytesOfElemTy= (Framer::getBitwidth (assignedObjTy))/8; 
         assert(numBytesOfElemTy!=0 &&"numBytesOfElemTy is zero\n");
-        
-        unsigned temptid= getFramerTypeID(assignedObjTy); 
-        FramerTyID= (int)temptid; 
-        assert(temptid==((int)temptid));
-        
+        FramerTyID= getFramerTypeID(assignedObjTy); 
         mytype=st->getElementType(0); 
         //get argument for getbitwidth. (it should be elemty)
     }
@@ -4803,8 +4405,6 @@ tempGVcount++;
 
 ////////debug.1
     
- //   errs()<<"PADDING GV: "<<GV->getName()<<"\n"; 
-     
     Constant* GVinitializer;
     Constant* hdInitializer;
     bool isConstant=false;
@@ -4815,21 +4415,17 @@ tempGVcount++;
     else {
         GVinitializer= Constant::getNullValue(assignedObjTy); 
     }
-   
-   // errs()<<" create HeaderInitializer starts\n";
-     
+    
         // ?? difference between hasInitializer (above) and isConstant? forgot..  
     if (GV->isConstant()) {
         hdInitializer= createHeaderInitializer (GV, 
                                             FramerTyID,
-                                            numElems,
-                                            numBytesOfElemTy);
+                                            numElems*numBytesOfElemTy);
         isConstant=true;
     }
     else {
         hdInitializer= Constant::getNullValue(HeaderTy);
     }
-   // errs()<<" create HeaderInitializer ends\n";
     
 //// debug.2 
      
@@ -4942,18 +4538,6 @@ tempGVcount++;
                     gvTG, 
                     arglist,M);
 
-  #ifdef ENABLE_SPACEMIU  
-   
-    bool is_union= isUnionTy(assignedObjTy);
-    Value * constisUnionTy= 
-            constructValueFromFunc(is_union, F, 6); 
- 
-    pushtoarglist ( insertBeforeMe, 
-                    F->getFunctionType()->getParamType(6) , 
-                    constisUnionTy, 
-                    arglist,M);
-
-  #endif
 
 ////debug.3.5.try this   
 /*
@@ -5050,6 +4634,72 @@ void Framer::doGlobalVariable (GlobalVariable * GV, Function * F, Instruction * 
 
 */
 
+/* check if the GV is a string in printf function. */
+//bool Framer::isPrintfStr ( GlobalVariable * GV )
+static bool 
+isPrintfStr ( GlobalVariable * GV )
+{
+    if ( !(GV->hasPrivateLinkage() 
+        && GV->hasGlobalUnnamedAddr() 
+        && GV->isConstant()) ) {
+        dbg(errs()<<"not printf\n";)
+        return false;
+    }
+
+    if ((GV->getName().startswith(".str.")
+        ||GV->getName().startswith("str"))) {
+        return true;
+    }
+    
+    if (GV->hasOneUse()) {
+        
+        Value* val= (&*GV->use_begin())->getUser();    
+        for (Value::use_iterator it = val->use_begin(), ie = val->use_end(); it!=ie ; ++it) {
+            if (CallInst* ci= dyn_cast<CallInst>((&*it)->getUser())) {
+                StringRef fname = ci->getCalledValue()->stripPointerCasts()->getName();
+                if (!fname.equals("printf")
+                    && !fname.equals("puts")
+                    && !fname.equals("__assert_fail")
+                    && !fname.equals("fwrite")){ 
+                    return false;               
+                }
+            }
+        }
+        return true;
+    }
+    
+    bool isprintfstring= true;
+   
+    for (Value::use_iterator it = GV->use_begin(), ie = GV->use_end(); it!=ie ; ++it) {
+        Value* val= (&*it)->getUser();  
+        for (Value::use_iterator it1 = val->use_begin(), ie1 = val->use_end(); it1!=ie1 ; ++it1) {
+            if (CallInst * ci= dyn_cast<CallInst>((&*it1)->getUser())) {
+            StringRef fname = ci->getCalledValue()->stripPointerCasts()->getName();
+                if (fname.startswith("llvm.memset")
+                    || fname.startswith ("llvm.memcpy")
+                    || fname.startswith ("llvm.memmove")
+                    || fname.startswith ("llvm.strcpy")) {
+                    // TODO: add more addition: all string funcs? 
+                    errs()<<*GV<<"-- char array used for mem access func. so processing.. \n";
+                    isprintfstring= false;
+                    break;          
+                }
+            }
+            else if (Function* f= dyn_cast<Function>((&*it1)->getUser())) {
+                if (f->getName().startswith("llvm.memcpy")) {
+                    errs()<<">>GV: "<<*GV<<"\n";
+                    errs()<<"getuser"<<*(&*it1)->getUser()<<"\n";
+
+                }
+            }
+        }
+    }
+    return isprintfstring;
+
+   // && GV->getName().startswith(".str")); commented out since there are other strings named with something else.
+    return false;
+}
+
 bool Framer::hasConstructorAttribute (GlobalVariable * GV)
 {
     return (GV->hasAppendingLinkage() && GV->getName().equals(StringRef("llvm.global_ctors"))); 
@@ -5081,8 +4731,7 @@ void Framer::runOnGlobalVariables (Module &M)
     GlobalVariable* successorGV = &*M.global_begin();
     vector<GlobalVariable*> toBeRemovedList; 
    
-    for (Module::global_iterator gi = M.global_begin(), 
-            ge=M.global_end(); gi!=ge ; ++gi) {
+    for (Module::global_iterator gi = M.global_begin(), ge=M.global_end(); gi!=ge ; ++gi) {
         
         dbg(errs()<<"GI:: "<<*gi<<"\n";)
                    
@@ -5232,19 +4881,14 @@ void Framer::flagHooksDefinitionExists (Module &M)
                 {HookDefinitionExists[Instruction::SExt]=1;}
            
             /* binary operator hooks */
-            else if (instKindInStr.equals("addop"))     
-                {HookDefinitionExists[Instruction::Add]=1;}
-            else if (instKindInStr.equals("subop"))     
-                {HookDefinitionExists[Instruction::Sub]=1;}
-            else if (instKindInStr.equals("mulop"))     
-                {HookDefinitionExists[Instruction::Mul]=1;}
+            else if (instKindInStr.equals("addop"))     {HookDefinitionExists[Instruction::Add]=1;}
+            else if (instKindInStr.equals("subop"))     {HookDefinitionExists[Instruction::Sub]=1;}
+            else if (instKindInStr.equals("mulop"))     {HookDefinitionExists[Instruction::Mul]=1;}
             
-            else if (instKindInStr.equals("udiv"))      
-                {HookDefinitionExists[Instruction::UDiv]=1;}
-            else if (instKindInStr.equals("sdiv"))      
-                {HookDefinitionExists[Instruction::SDiv]=1;}
-            else if (instKindInStr.equals("lshr"))      
-                {HookDefinitionExists[Instruction::LShr]=1;}
+            else if (instKindInStr.equals("udiv"))      {HookDefinitionExists[Instruction::UDiv]=1;}
+            else if (instKindInStr.equals("sdiv"))      {HookDefinitionExists[Instruction::SDiv]=1;}
+            else if (instKindInStr.equals("lshr"))      {HookDefinitionExists[Instruction::LShr]=1;}
+            
             else { 
                 dbg(errs()<<"\tno hook provided!! Skipping..\n";)
             } 
@@ -5257,103 +4901,24 @@ void Framer::create1stBBOfMain (Module &M)
    fstBBOfMainFunction->splitBasicBlock(&*fstBBOfMainFunction->begin(), "fstBBOfMain");
 }
 
-void 
-Framer::doInitFuncHook (Module & M)
+void Framer::doInitFuncHook (Module &M)
 {
-    Function * F= 
-        M.getFunction("FRAMER_do_initializing");
-    assert (F!= nullptr 
-            && "FRAMER_do_initializing empty!\n");
-
+    Function * F = M.getFunction("FRAMER_do_initializing");
+    assert(F!= nullptr && "FRAMER_do_initializing empty!\n");
     Instruction* insertBeforeMe= &*(Func_main->begin()->begin());
+    Value * numStructTy= constructValueFromFunc (structTyCount, F, 0);
+    Value * addressOfStructTable= StructTyTable;
     
-    errs()<<"type1: "<<*StructTyTable->getType()<<"\n";
-
     vector<Value *> arglist;
-
-    Value * numStructTy= 
-            constructValueFromFunc (structTyCount, F, 0);
-    pushtoarglist (insertBeforeMe, 
-                   F->getFunctionType()->getParamType(0), 
-                   numStructTy, arglist,M);
-  
-    pushtoarglist (insertBeforeMe, 
-                   F->getFunctionType()->getParamType(1), 
-                   StructTyTable, arglist, M);
-
-
-#ifdef ENABLE_SPACEMIU 
- 
-    pushtoarglist (insertBeforeMe, 
-                   F->getFunctionType()->getParamType(2), 
-                   rtOffsetTbl, arglist, M);
-    
-    Value * consttotalofs= 
-            constructValueFromFunc(totaloffsetcount, F, 3);  
-    pushtoarglist (insertBeforeMe, 
-                   F->getFunctionType()->getParamType(3), 
-                   consttotalofs, arglist, M);
-    
-    Value * constmaxtysperoff= 
-            constructValueFromFunc(maxtysperoff, F, 4); 
-    pushtoarglist (insertBeforeMe, 
-                   F->getFunctionType()->getParamType(4), 
-                   constmaxtysperoff, arglist, M);
-    
-    Value * constmaxoffsetval= 
-            constructValueFromFunc(maxoffsetval, F, 5); 
-    pushtoarglist (insertBeforeMe, 
-                   F->getFunctionType()->getParamType(5), 
-                   constmaxoffsetval, arglist, M);
-    
-    Value * consttblentrysize= 
-            constructValueFromFunc(tblentrysize, F, 6); 
-    pushtoarglist (insertBeforeMe, 
-                   F->getFunctionType()->getParamType(6), 
-                   consttblentrysize, arglist, M);
-  #ifndef RTTABLE_VERSION_1
-    pushtoarglist (insertBeforeMe,
-                   F->getFunctionType()->getParamType(7),
-                   SafecastTable, arglist, M);
-  #endif
-
-#endif
+    pushtoarglist (insertBeforeMe, F->getFunctionType()->getParamType(0), numStructTy, arglist,M);
+    pushtoarglist (insertBeforeMe, F->getFunctionType()->getParamType(1), addressOfStructTable, arglist,M);
 
     CallInst * CI = CallInst::Create (F, arglist, ""); // hook func callinst created.
     // before any insertion of new insts, replace all uses.
     insertCastInstForArg (insertBeforeMe, arglist);
     CI->insertBefore (insertBeforeMe); //then hook callinst inserted.
-    errs()<<"\n Done with doInitFuncHook\n"; 
-}
     
-void Framer::assertBasicTyTable(Module &M)
-{
-    assert((Type::VectorTyID+1)==llvmbasicTyCount && 
-    "llvm's typeID enum has been updated?? check the count of enum, typeid\n"); 
-}
-
-/*
-void Framer::createUserStructTyList (Module &M)
-{
-    /// collecting only identified struct types. // 
-    /// Opaque types are added on the fly. // 
-    vector <StructType*> temp= M.getIdentifiedStructTypes();
-    for(vector<StructType*>::iterator it = temp.begin(), ie=temp.end();it!=ie;++it)
-    {
-        // when two struct types have the same physical layout, 
-        // llvm deletes others, and keeps one alive. 
-        //so should keep all identified struct types,
-        // since Framer types may be the chosen ones.
-        if ((*it)->isOpaque()) {
-            errs()<<"opaque. skipping: "<<**it<<"\n";
-            continue;
-        }
-
-
-    CallInst * CI = CallInst::Create (F, arglist, ""); // hook func callinst created.
-    // before any insertion of new insts, replace all uses.
-    insertCastInstForArg (insertBeforeMe, arglist);
-    CI->insertBefore (insertBeforeMe); //then hook callinst inserted.
+    //initHookCall= CI;    
 }
     
 void Framer::assertBasicTyTable(Module &M)
@@ -5373,35 +4938,7 @@ void Framer::createUserStructTyList (Module &M)
         // llvm deletes others, and keeps one alive. 
         //so should keep all identified struct types,
         // since Framer types may be the chosen ones.
-        if ((*it)->isOpaque()) {
-            errs()<<"opaque. skipping: "<<**it<<"\n";
-            continue;
-        }
-
-
-    CallInst * CI = CallInst::Create (F, arglist, ""); // hook func callinst created.
-    // before any insertion of new insts, replace all uses.
-    insertCastInstForArg (insertBeforeMe, arglist);
-    CI->insertBefore (insertBeforeMe); //then hook callinst inserted.
-}
-void Framer::assertBasicTyTable(Module &M)
-{
-    assert((Type::VectorTyID+1)==llvmbasicTyCount && 
-    "llvm's typeID enum has been updated?? check the count of enum, typeid\n"); 
-}
-*/ 
-
-void Framer::createUserStructTyList (Module &M)
-{
-    /// collecting only identified struct types. // 
-    /// Opaque types are added on the fly. // 
-    vector <StructType*> temp= M.getIdentifiedStructTypes();
-    for(vector<StructType*>::iterator it = temp.begin(), ie=temp.end();it!=ie;++it)
-    {
-        // when two struct types have the same physical layout, 
-        // llvm deletes others, and keeps one alive. 
-        //so should keep all identified struct types,
-        // since Framer types may be the chosen ones.
+        errs()<<"TY: "<<**it<<"\n"; 
         if ((*it)->isOpaque()) {
             errs()<<"opaque. skipping: "<<**it<<"\n";
             continue;
@@ -5410,7 +4947,7 @@ void Framer::createUserStructTyList (Module &M)
         dbg(errs()<<"structlist name: "<<(*it)->getStructName()<<"\n";)
     }
     structTyCount = allStructTyList.size(); 
-    //contains only used one. includes substruct, struct.  
+    //contains only used one. includes substruct, anonymous struct.  
 }
 
 unsigned Framer::getMaxFieldCountOfStruct()
@@ -5436,20 +4973,21 @@ void Framer::createStructTypeTable(Module &M)
     unsigned max_field_count= getMaxFieldCountOfStruct();
     errs()<<"max field count: "<<max_field_count<<"\n";
 
-    Type* structsizeT=  IntegerType::getInt32Ty (M.getContext()); 
+    Type* structsizeT =  IntegerType::getInt32Ty (M.getContext()); 
     ArrayType* FieldsArrayT=  ArrayType::get(IntegerType::get(M.getContext(),32), max_field_count);
-    vector<Type*> onestructTylsit= {structsizeT, FieldsArrayT}; 
+    vector<Type*> onestructTylsit = {structsizeT, FieldsArrayT}; 
     StructType* oneStructT = StructType::create(
         M.getContext(), onestructTylsit, StringRef("FRAMER_oneStryctTy")); 
     
-    vector<Constant*> StructTypeVector;
     
+    vector<Constant*> StructTypeVector;
     for (vector<StructType*>::iterator it=allStructTyList.begin(), 
             ie=allStructTyList.end();it!=ie;++it) {
         if ((*it)->isOpaque()) {
             errs()<<"Opaque found in struct type list:\n\t"<<**it<<"\n";
             exit(0);
         }
+           
         unsigned structsize= 0; 
         int framertyid= -1;
         Constant * fieldconst; 
@@ -5488,6 +5026,11 @@ void Framer::createStructTypeTable(Module &M)
     ArrayType* StructsT=    ArrayType::get(oneStructT, StructTypeVector.size());
     Constant* structTableArray = ConstantArray::get(StructsT, StructTypeVector);
      
+    //GlobalVariable* pointerTyTable = M.getGlobalVariable(StringRef("FRAMER_PointerTy_Table"));
+    //assert((pointerTyTable!=nullptr) && "global pointerTyTable does not exist.Check pass code..\n");
+    
+    //GlobalVariable* FRAMER_TABLE_ = M.getGlobalVariable(StringRef("FRAMER_TABLE"));
+    //assert((FRAMER_TABLE_!=nullptr) && "global FRAMER_TABLE does not exist.Check pass code..\n");
     errs()<<"structTAbleArray crected\n";
      
     StructTyTable = new GlobalVariable (M, 
@@ -5496,6 +5039,8 @@ void Framer::createStructTypeTable(Module &M)
                                         GlobalValue::ExternalLinkage,
                                         structTableArray,//nullStructTbl,
                                         "FRAMER_StructTyTable");
+                                        //FRAMER_TABLE_);
+                                        //pointerTyTable);
 }
 
 void Framer::doInitialSetup (Module &M)
@@ -5504,90 +5049,33 @@ void Framer::doInitialSetup (Module &M)
     dlayout = &(M.getDataLayout());
      
     Function * Func_main_               = M.getFunction ("main");
-    assert (Func_main_!=nullptr 
-            && "test:Func_main_ empty!!\n");
-    Func_main= Func_main_;
-    assert (Func_main!=nullptr 
-            && "main empty!!\n");
+    assert(Func_main_!=nullptr && "test:Func_main_ empty!!\n");
+    Func_main               = Func_main_;
+    assert(Func_main!=nullptr && "main empty!!\n");
     fstBBOfMainFunction     = &*Func_main->begin();
     fstInstOfMainFunction   = &*((Func_main->begin())->begin());
-    
-    assert (fstInstOfMainFunction!= nullptr 
-            && "fstInstOfMainFunction empty!\n"); 
-    
+    assert(fstInstOfMainFunction!= nullptr && "fstInstOfMainFunction empty!\n"); 
     HeaderTy= M.getTypeByName(StringRef("struct.FRAMER_Headers"));
     OffByOneTy= Type::getInt8Ty (M.getContext());
     
     assert((HeaderTy!= nullptr)
         && "HeaderTy is empty. Check if FRAMER_Headers is re-named or ever used. \n");
 
-    const StructLayout * headerTyLayout= 
-            dlayout->getStructLayout (HeaderTy);
-    headerTySize= headerTyLayout->getSizeInBytes (); 
+    const StructLayout * headerTyLayout= dlayout->getStructLayout (HeaderTy);
+    headerTySize = headerTyLayout->getSizeInBytes (); 
     errs()<<"headerTySize: "<<headerTySize<<"\n";
-    headerTyAlign= headerTyLayout->getAlignment();
+    headerTyAlign = headerTyLayout->getAlignment();
     
-    assert (headerTySize==16 
-            && "check headerTy size.\n"); 
-    assert (!headerTyLayout->hasPadding() 
-            && "type must be packed!!\n"); 
+    assert (headerTySize==16 && "check headerTy size.\n"); 
+    assert (!headerTyLayout->hasPadding() && "type must be packed!!\n"); 
 
     assertBasicTyTable(M); 
     dbg(errs()<<"assertedBasictypetable done \n";)
     
     createUserStructTyList(M);
     dbg(errs()<<"createUserStructTyList done \n";)
-
-  #ifdef ENABLE_SPACEMIU
-
-    /* currentoy, opaque and packed structures not included. */
-    createAllTypeList(AllTypeList, M);
-    
-    errs()<<">>>type size: "<<AllTypeList.size()<<"\n"; 
-  
-    errs()<<">>> start or type tables........\n";
-    
-    createTypeTables (AllTypeList, SafeCasts, 
-                      DownCasts, tyoffsets, 
-                     #ifndef RTTABLE_VERSION_1 
-                      flatrtoffsets, //just one tid at one offset. 
-                      MaxOffset,
-                     #endif 
-                      M);
-     
-     
-    maxoffsetval= getMaxCount_offsets (tyoffsets
-                                 ,maxoffsperty 
-                                 ,totaloffsetcount 
-                                 ,maxtysperoff
-                                 );
-
-    setUpSomeRTTypes (SafeTidsTy,
-                      oneOffsetTy,
-                      entryT,
-                      tableT,
-                      maxtysperoff,
-                      maxoffsperty,
-                      tyoffsets.size(),
-                      tblentrysize,
-                   #ifndef RTTABLE_VERSION_1
-                      MaxOffset,
-                      flatrtoffsets.size(), 
-                   #endif
-                      M);
    
-  #ifndef RTTABLE_VERSION_1  
-    max_upcasts= getMaxCount (SafeCasts);
-    assert(max_upcasts != 0);
-  #endif  
-
-    errs()<<"#All types:\t"<<AllTypeList.size()<<"\n";
-    errs()<<"MaxOffset:\t"<<MaxOffset<<"\n";
-    errs()<<"max_upcasts:\t"<<max_upcasts<<"\n";
-
-    errs()<<">>> end or type tables........ \n";
-  
-  #endif   // endif of ENABLE_SPACEMIU
+    createTypeLayoutTable(M);
     
     flagHooksDefinitionExists(M);
     dbg(errs()<<"flagHooksDefinitionExists done \n";)
@@ -5595,26 +5083,85 @@ void Framer::doInitialSetup (Module &M)
     create1stBBOfMain (M); // BB processing global vars.
     dbg(errs()<<"create1stBBOfMain done \n";)
     
+    /* // moved to after runonmodule
+    errs()<<"now doinitFuncHook...\n";
+    doInitFuncHook(M);  
+    */
 }
 
 
+static bool
+isNonArrayAccess(GEPOperator * op)
+{
+    Value * ptrop= op->getPointerOperand()->stripPointerCasts(); 
+   
+    if (isa<GlobalVariable>(ptrop) || isa<AllocaInst>(ptrop)) {
+    
+        PointerType * pty= dyn_cast<PointerType>(ptrop->getType()); 
+        assert(pty!=nullptr);
+        
+        if (pty->getElementType()->isArrayTy()) {
+            return false;      
+        }
+        if (pty->getElementType()->isStructTy()
+            || pty->getElementType()->isVectorTy()) {
+            return true;
+        }
+        if (isa<GlobalVariable>(ptrop)) {
+            GlobalVariable * gv= cast<GlobalVariable>(ptrop);
+            if (isPrintfStr(gv) ||
+                (gv->getName()).startswith("llvm.used") ||
+                 gv->getName().startswith("switch.table") ) {
+                return true;
+            }
 
-bool 
-Framer::runOnBasicBlock (BasicBlock &BB, 
-                         DominatorTree & dt, 
-                         AAResults & AA,
-                       #ifdef ENABLE_SPACEMIU
-                         vector <AllocaInst*> & LocalUnions,
-                       #endif
-        //                 Function & F,
-                         Module &M)
+        }
+    }
+    return false;
+}
+
+// CCured's safeptr - not involved with pointer arith or type cast
+bool Framer::isSafePtr (Value * ptr)
+{
+    Value * p=ptr->stripPointerCasts(); 
+    if (isa<GlobalVariable>(p) || isa<AllocaInst>(p)) {
+        return true;   
+    }
+    if (isa<GEPOperator>(p)) { //li's ptrop == gep. return false.
+
+#ifndef TRACK_STRUCT_ALSO 
+        if (isNonArrayAccess(cast<GEPOperator>(p))) {
+            return true;
+        }
+#endif
+        return false;
+    }
+
+////////
+/*  for (Value::user_iterator it= ptr->user_begin();it!=ptr->user_end();++it) { // for all uses of Ptr
+    // if it's load or store
+    if (!isa<LoadInst>(*it) && !isa<StoreInst>(*it)) continue; 
+    Instruction * ins= cast<Instruction>(*it); 
+    // if its function is S_regmatch
+    if (!ins->getFunction()->getName().equals("S_regmatch")) continue;      
+    
+    errs()<<"*: "<<*ptr<<", ("<<*ptr->stripPointerCasts()<<" )\n"; 
+    //printf
+  }    
+*/
+
+///////////
+
+    return false;
+} 
+
+bool Framer::runOnBasicBlock (BasicBlock &BB, DominatorTree & dt, Module &M)//, PostDominatorTree & postDT) 
 {
     /* successorInst is introduced to store the original next instruction 
          distinguished from insts added by the pass. */ 
     Instruction * successorInst = &*BB.begin();
     vector<Instruction*> toBeRemovedList; 
     for (BasicBlock::iterator it = BB.begin(), ie = BB.end();it != ie; ++it) {
-       
         dbg(errs()<<"\nInst:::\t"<<*it<<"\n";) 
 
         if (&*it != &*successorInst) {
@@ -5622,38 +5169,27 @@ Framer::runOnBasicBlock (BasicBlock &BB,
             continue;
         }
         successorInst = getNextInst(&*it);
-        
+       
         ////// skip hooking instructions for GV bounds check.
         set<Instruction*>::iterator findit= 
+            //FramerLoads.find(FramerLoads.begin(), FramerLoads.end(), *it); 
             FramerLoads.find(&*it); 
-        
         if (findit!=FramerLoads.end()) {
             continue; 
         }
-        
         //// upto here
          
         if (AllocaInst * AI = dyn_cast<AllocaInst>(it) ){
-    
-    #ifndef DISABLE_HOOK_ALLOCA
+#ifndef DISABLE_HOOK_ALLOCA
             if (!HookDefinitionExists[Instruction::Alloca]) {
                 dbg(errs()<<"No hooks provided for alloca inst. Skipping..1\n";) 
                 continue;
             }
-            Instruction* toBeRemoved= doAllocaInst (AI, 
-                            successorInst, 
-                          #ifdef ENABLE_SPACEMIU
-                            LocalUnions, 
-                          #endif
-                            M);
-          
-            
+            Instruction* toBeRemoved= doAllocaInst (AI, successorInst, M);//, postDT);
             if (toBeRemoved!= 0x0) { 
-              
-             
                 toBeRemovedList.push_back(toBeRemoved);
             }
-    #endif /* end of DISABLE_HOOK_ALLOCA */
+#endif
 
         }
         else if (LoadInst * LI = dyn_cast<LoadInst>(it) ) {
@@ -5661,7 +5197,7 @@ Framer::runOnBasicBlock (BasicBlock &BB,
             if (PointersAreTagged) {
                 restoreModifiedPtr (LI);
             }
-          */ 
+          */  
             if (!HookDefinitionExists[Instruction::Load]) {
                 dbg(errs()<<"No hooks provided for this inst. Skipping..\n";) 
                 continue;
@@ -5672,26 +5208,13 @@ Framer::runOnBasicBlock (BasicBlock &BB,
                     continue;    
                 }
             }
+            //if (!isTaggedPointer(LI->getPointerOperand())){
             if (isSafePtr(LI->getPointerOperand())) {
                 dbg(errs()<<"skip. safeptr: "<<*LI->getPointerOperand()<<"\n";)
                 safeptr++;
                 continue;
             }
-    #ifdef SKIP_NON_TAGGED 
-            if (isNonTagged(LI, AA, M)) {
-                safeptr++;
-                continue;    
-            }
-    #endif
-          #ifdef ENABLE_SPACEMIU
-
-            doLoadInstForSpaceMiu (LI, successorInst, dt, 
-                                   AA, LocalUnions, M);
-          #else  
-
-            doLoadInst (LI, successorInst, dt, AA, M);
-
-          #endif
+            doLoadInst (LI, successorInst, dt, M);
         }
         else if (StoreInst * SI = dyn_cast<StoreInst>(it) ) {
             if (!HookDefinitionExists[Instruction::Store]) {
@@ -5704,32 +5227,11 @@ Framer::runOnBasicBlock (BasicBlock &BB,
                     continue;    
                 }
             }
-            if (isSafePtr(SI->getPointerOperand())) {
-                safeptr++;
+            /*if (isSafePtr(SI->getPointerOperand())) {
                 continue;
-            }
-    #ifdef SKIP_NON_TAGGED 
-          
-            if (isNonTagged(LI, AA, M)) {
-                safeptr++;
-                continue;
-            }
-    #endif
-            // for Store, this skipping test goes inside doStore. since we might tag referencing??
-            
-          #ifdef ENABLE_SPACEMIU 
-           
-            doStoreInstForSpaceMiu (SI, successorInst, dt, 
-                                   AA, LocalUnions, M);
-          #else
-         
+            }*/ // for Store, this skipping test goes inside doStore. since we might tag referencing.
             doStoreInst (SI, successorInst, dt, M);
-          
-          #endif
         }
-    
-    #ifndef DISABLE_CHECKS_AT_GEP
-      
         else if (GetElementPtrInst * GEP = dyn_cast<GetElementPtrInst>(it)) {
             dbg(errs()<<"entering GEP..?\n";)
             if (!HookDefinitionExists[Instruction::GetElementPtr]) {
@@ -5744,45 +5246,25 @@ Framer::runOnBasicBlock (BasicBlock &BB,
             doGetElementPtrInst (GEP, successorInst, M);
         }
 
-    #endif
-
         else if (CallInst * CI = dyn_cast<CallInst>(it)) {
             if (!HookDefinitionExists[Instruction::Call]) {
                 dbg(errs()<<"No hooks provided for Call (llvm.memcpy) inst. Skipping..\n";) 
                 continue;
             }
-            
-            Instruction * toBeRemoved= 
-                doCallInst (CI, successorInst, AA, 
-                          #ifdef ENABLE_SPACEMIU
-                            LocalUnions, 
-                          #endif
-                            M);
-            
+            Instruction * toBeRemoved = doCallInst (CI, successorInst, M);
             if (toBeRemoved!= 0x0) { 
                 toBeRemovedList.push_back(toBeRemoved);
             }
         }
-      #ifdef ENABLE_SPACEMIU
-
+        
+        /*
         else if (BitCastInst * BCI = dyn_cast<BitCastInst>(it)){
             if (!HookDefinitionExists[Instruction::BitCast]) {
                 dbg(errs()<<"No hooks provided for this inst. Skipping..\n";)
                 continue;
             }
-            if (isSafePtr(BCI->getOperand(0))) {
-                //errs()<<"skip. SPACEMIU: safeptr: "<<*BCI->getOperand(0)<<"\n";
-                safeptr++;
-                continue;
-            }
-            if (isCastWeDoNOTHandle(BCI)) {
-                continue;
-            }
-            doBitCastInst (BCI, successorInst, AA, LocalUnions, M);        
+            doBitCastInst (BCI, successorInst, M);        
         }
-      #endif
-      
-        /*
         else if (PtrToIntInst * PTI = dyn_cast<PtrToIntInst>(it)) {
             if (!HookDefinitionExists[Instruction::PtrToInt]) {
                 dbg(errs()<<"No hooks provided for this inst. Skipping..\n";)
@@ -5793,6 +5275,7 @@ Framer::runOnBasicBlock (BasicBlock &BB,
         else if (IntToPtrInst * ITP = dyn_cast<IntToPtrInst>(it)) {
             doIntToPtrInst (ITP, successorInst, M);
         }
+        */
         else if (SIToFPInst * STF = dyn_cast<SIToFPInst>(it)) {
                if (!HookDefinitionExists[Instruction::SIToFP]) {
                 dbg(errs()<<"No hooks provided for this inst. Skipping..\n";)
@@ -5825,10 +5308,7 @@ Framer::runOnBasicBlock (BasicBlock &BB,
             } 
             doSExtInst (SI, successorInst, M);
         }
-        */
-        
-        /*
-        else if (BinaryOperator * BO = dyn_cast<BinaryOperator>(it)) {
+        /*else if (BinaryOperator * BO = dyn_cast<BinaryOperator>(it)) {
                 doBinaryOp (BO, successorInst, M);
         }*/
         /*else if (PossiblyExactOperator * PEO = dyn_cast<PossiblyExactOperator>(it)) {
@@ -5851,11 +5331,11 @@ Framer::runOnBasicBlock (BasicBlock &BB,
     }
 
   dbg(
-   // errs()<<"sssss\n";
-   // for (BasicBlock::iterator it = BB.begin(), ie = BB.end();it != ie; ++it) {
-   //     errs()<<"ins: "<<*it<<"\n";        
-   // }
-   // errs()<<"eeeee\n";
+    errs()<<"sssss\n";
+    for (BasicBlock::iterator it = BB.begin(), ie = BB.end();it != ie; ++it) {
+        errs()<<"ins: "<<*it<<"\n";        
+    }
+    errs()<<"eeeee\n";
   )
     return true;
 }
@@ -6072,11 +5552,11 @@ void Framer::doExitingMain (Module &M)
     vector <Value*> arglist;
     Function * exitmain= M.getFunction ("FRAMER_exit_main");
     assert(exitmain!=nullptr && "FRAMER_exit_main empty!\n"); 
-    
     for (Function::iterator bi=Func_main->begin(),
             be=Func_main->end(); bi!=be;++bi) { // for BB
         TerminatorInst * TI= (&*bi)->getTerminator();
         assert(TI!=nullptr && "TerminatorInst is null.\n");
+
         if (isa<ReturnInst>(TI)) {
             CallInst * CI= CallInst::Create(M.getFunction ("FRAMER_exit_main"), 
                     arglist, 
@@ -6098,42 +5578,29 @@ void Framer::doExitingMain (Module &M)
     }
 }
 
-bool 
-Framer::runOnFunction (Function &F, 
-                       Module &M)
+bool Framer::runOnFunction(Function &F, Module &M)//, PostDominatorTree & postDT)
 {
     dbg(errs()<<"now running on Function:  "<<F.getName()<<" processing...\n";)
        
     DominatorTree &dt= getAnalysis<DominatorTreeWrapperPass>(F).getDomTree();
-    AAResults & aaresult= getAnalysis<AAResultsWrapperPass>(F).getAAResults();
 
-   
-  /* Used only for SpaceMiu */
-  #ifdef ENABLE_SPACEMIU
-    vector <AllocaInst*> LocalUnions; 
-  #endif  
-  
-  /* end of SPACEMIU */
+  /*  if (F.getName().equals("Perl_magic_getsig")) { 
+        errs()<<"=====abcd\n";
+        for(Function::arg_iterator ait=F.arg_begin(); ait!=F.arg_end(); ++ait) {
+            errs()<<"arg: "<<*ait<<"\n";   
+        }
+        errs()<<F<<"\n";
+        errs()<<"=====1\n";
+    }*/
 
-    for (Function::iterator fi = F.begin(), 
-            fe = F.end(); fi!=fe ; ++fi ){
+
+    for (Function::iterator fi = F.begin(), fe = F.end(); fi!=fe ; ++fi ){
         
-        if (&*fi == &*Func_main->begin() 
-            && (F.getName() == "main")) {
+        if (&*fi == &*Func_main->begin() && (F.getName() == "main")) {
             //skip // since it is basicblock for global variable processing hooks.     
             continue; 
         }
-        
-
-
-        Framer::runOnBasicBlock (*fi, 
-                dt, 
-                aaresult, 
-              #ifdef ENABLE_SPACEMIU  
-                LocalUnions, 
-              #endif
-              //  F,
-                M);//, postDT); 
+        Framer::runOnBasicBlock(*fi, dt, M);//, postDT); 
     }
     dbg(errs()<<"after func iteration\n";)
    
@@ -6145,11 +5612,14 @@ Framer::runOnFunction (Function &F,
     dbg(errs()<<"after do exiting main\n";)
 
 /////// printing inst
-       dbg( if (F.getName().startswith("initialize_argument_information")) { 
-            errs()<<"===================================0\n";
+  /*      if (F.getName().equals("Perl_magic_getsig")) { 
+            errs()<<"=====0\n";
+            for(Function::arg_iterator ait=F.arg_begin(); ait!=F.arg_end(); ++ait) {
+                errs()<<"arg: "<<*ait<<"\n";   
+            }
             errs()<<F<<"\n";
-            errs()<<"===================================1\n";
-        })
+            errs()<<"=====1\n";
+        }*/
 ///////// 
     return true;
 }
@@ -6157,22 +5627,16 @@ Framer::runOnFunction (Function &F,
 bool Framer::runOnModule (Module &M) 
 {
     framerpasscounter++;
-        
+    
     doInitialSetup (M);
 
     runOnGlobalVariables(M); 
-   
-  #ifdef ENABLE_SPACEMIU
- 
-    createGVUnionsList(M, GVUnions);    
- 
-  #endif
-   
+    
     errs()<<"Starting run on functions..\n"; 
     /* processing each instruction for each BB for each function */
     for (Module::iterator mi=M.begin(), me=M.end(); mi!=me ; ++mi) {
         dbg(errs()<<"Function::  "<<mi->getName()<<"\t"; )
-        if (isHookFamilyFunction (&*mi)) {
+        if ( isHookFamilyFunction (&*mi)) {
             dbg(errs()<<"\t::Hook.Skipping..\n";)
             continue;
         }
@@ -6182,58 +5646,28 @@ bool Framer::runOnModule (Module &M)
         }
 
         runOnFunction(*mi, M);
+        
+        if ((*mi).getName().equals("BZ2_blockSort")) {
+            errs()<<"main================= \n";
+            for (Function::iterator bit=(*mi).begin();bit!=(*mi).end();++bit) {
+                for (BasicBlock::iterator iit=(*bit).begin();iit!=(*bit).end();++iit) {
+                    if (!isa<BitCastOperator>(iit)){
+                        errs()<<*iit<<"\n";
+                    }
+                }
+            }
+            errs()<<"--main================= \n";
+        }
     }
 
-    errs()<<"\nAfter run on all function. now createStructTypeTable starting..\n";
- 
-    createStructTypeTable(M);
-    errs()<<">> createStructTypeTable done \n";
-  
-    // * create runtime safecast table. *
-   
-    // TODO: now we inserted safecasts to tyoffsets, so this is redundant??
-    // so commmented out.
+
+    dbg(errs()<<"after run on all function. now createStructTypeTable starting..\n";)
+    errs()<<"after run on all function. now createStructTypeTable starting..\n";
     
-#ifdef ENABLE_SPACEMIU     
+    createStructTypeTable(M); 
+    dbg(errs()<<"createStructTypeTable done \n";)
 
-  #ifndef RTTABLE_VERSION_1  
-    max_upcasts= getMaxCount (SafeCasts);
-    assert(max_upcasts != 0);
-     
-    createRTSafeCastsTable (SafeCasts, 
-            SafecastTable, max_upcasts, M); 
-
-  #endif // end of RTTABLE_VERSION_1 
-  
-    // TODO: optimized RT type tables. 
-    // for example, framers' types that are not used outside hooks.
-    // mind that LLVM merges same structure types, and framer's types can be chosen. 
-
-      
-    createRTOffsetTable (AllTypeList, 
-                         SafeCasts, 
-                         tyoffsets, 
-                         totaloffsetcount, // not used currently
-                         maxtysperoff, 
-                         maxoffsetval, // not used currently
-                         maxoffsperty, 
-                         tblentrysize, 
-                         SafeTidsTy,
-                         oneOffsetTy,
-                         entryT, 
-                         tableT,
-                       #ifndef RTTABLE_VERSION_1  
-                         flatrtoffsets,
-                         MaxOffset,
-                       #endif
-                         rtOffsetTbl, M);
-    
-    assert(rtOffsetTbl!=nullptr);
-
-#endif 
-     
     doInitFuncHook(M);
-    
     errs()<<"GV counts: "<<tempGVcount<<"\n";
     errs()<<"tempload: "<<tempload<<"\n";
     errs()<<"temploadsafe: "<<temploadsafe<<"\n";
