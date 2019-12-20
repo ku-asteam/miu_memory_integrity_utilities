@@ -1,4 +1,5 @@
-#FRAMER: Software-based Capability Model
+#FRAMER: A Tagged-pointer Capability Model
+#spaceMIU: A Run-time Type Confusion Checker for C/C++
  
 aSTEAM Project https://asteam.korea.ac.kr
 
@@ -10,6 +11,15 @@ on LLVM intermediate representation, and produces a instrumented executable.
 This consists of FRAMER's program transformation pass,
 compiler optimization passes, and static and binary libraries.
 
+SpaceMiu is a run-time typecast checker for C (this will be extended
+to C++). The majority of typecasts in C/C++ programs are either
+upcasts (conversion from a descendant type to its ancestor type) or
+downcasts (in the opposite direction). This run-time type confusion
+checker implements physical sub-typing for C and pointer-to-type
+mapping, and detects unsafe downcasts at run-time using FRAMER’s 
+per-object metadata storage and two type descriptors - 
+a type layout table and type relation table.
+ 
 # Requirements and Dependencies
 
 (1) An UNIX-like Operating System
@@ -48,4 +58,7 @@ with modification of
     for LLVMGold.so, libLTO.so, libLLVM.so 
 
 
-
+5. Choice of two modes: bounds checking and type confusion checking
+    Requires SRC code modification (framertypes.h and Framer.cpp)
+    Enable ENABLE_SPACEMIU to run on type checking mode.
+    
