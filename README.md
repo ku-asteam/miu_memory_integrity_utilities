@@ -1,4 +1,4 @@
-#FRAMER: Software-based Capability Model
+# FRAMER: Software-based Capability Model
  
 aSTEAM Project https://asteam.korea.ac.kr
 
@@ -10,15 +10,16 @@ on LLVM intermediate representation, and produces a instrumented executable.
 This consists of FRAMER's program transformation pass,
 compiler optimization passes, and static and binary libraries.
 
-# Requirements and Dependencies
+## Requirements and Dependencies
 
 (1) An UNIX-like Operating System
 (2) clang/llvm version 4.0.0 or newer.
 
-# Instructions
+## Instructions
 
 1. Configure LLVM with cmake
 
+`
 ./llvm_build/
 CC=/usr/bin/gcc \
 CXX=/usr/bin/g++  \
@@ -29,10 +30,11 @@ DCMAKE_CXX_LINK_FLAGS=-L/usr/lib64 \
 -DLLVM_BUILD_LLVM_DYLIB=ON \
 -DLLVM_LINK_LLVM_DYLIB=ON \
 /path/to/llvm/src/dir/
+`
 
-2. Build Gold plugin
-with this option:
--DLLVM_BINUTILS_INCDIR=/path/to/llvm/binutils/binutils/include/ \
+2. Build Gold plugin with this option:
+
+`-DLLVM_BINUTILS_INCDIR=/path/to/llvm/binutils/binutils/include/ \`
 
 Reference: https://llvm.org/docs/GoldPlugin.html
 

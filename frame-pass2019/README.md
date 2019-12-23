@@ -1,5 +1,6 @@
-#FRAMER: A Tagged-pointer Capability Model
-#spaceMIU: A Run-time Type Confusion Checker for C/C++
+# SpaceMIU: A Run-time Type Confusion Checker for C/C++
+
+> FRAMER: A Tagged-pointer Capability Model
  
 aSTEAM Project https://asteam.korea.ac.kr
 
@@ -20,16 +21,16 @@ mapping, and detects unsafe downcasts at run-time using FRAMER’s
 per-object metadata storage and two type descriptors - 
 a type layout table and type relation table.
  
-# Requirements and Dependencies
+## Requirements and Dependencies
 
 (1) An UNIX-like Operating System
 (2) clang/llvm version 4.0.0 or newer.
 
-# Instructions
+## Instructions
 
 1. Configure LLVM with cmake
 
-./llvm_build/
+`./llvm_build/
 CC=/usr/bin/gcc \
 CXX=/usr/bin/g++  \
 cmake -G "Unix Makefiles" \
@@ -39,10 +40,11 @@ DCMAKE_CXX_LINK_FLAGS=-L/usr/lib64 \
 -DLLVM_BUILD_LLVM_DYLIB=ON \
 -DLLVM_LINK_LLVM_DYLIB=ON \
 /path/to/llvm/src/dir/
+`
 
-2. Build Gold plugin
-with this option:
--DLLVM_BINUTILS_INCDIR=/path/to/llvm/binutils/binutils/include/ \
+2. Build Gold plugin with this option:
+
+`-DLLVM_BINUTILS_INCDIR=/path/to/llvm/binutils/binutils/include/ \`
 
 Reference: https://llvm.org/docs/GoldPlugin.html
 
