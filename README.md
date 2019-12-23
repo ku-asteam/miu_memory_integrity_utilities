@@ -1,4 +1,4 @@
-#FRAMER: Software-based Capability Model
+# FRAMER: Software-based Capability Model
  
 aSTEAM Project https://asteam.korea.ac.kr
 
@@ -10,12 +10,12 @@ on LLVM intermediate representation, and produces a instrumented executable.
 This consists of FRAMER's program transformation pass,
 compiler optimization passes, and static and binary libraries.
 
-# Requirements and Dependencies
+## Requirements and Dependencies
 
 (1) An UNIX-like Operating System
 (2) clang/llvm version 4.0.0 or newer.
 
-# Instructions
+## Instructions
 
 1. Configure LLVM with cmake
 
