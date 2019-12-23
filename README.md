@@ -19,6 +19,7 @@ compiler optimization passes, and static and binary libraries.
 
 1. Configure LLVM with cmake
 
+`
 ./llvm_build/
 CC=/usr/bin/gcc \
 CXX=/usr/bin/g++  \
@@ -29,10 +30,11 @@ DCMAKE_CXX_LINK_FLAGS=-L/usr/lib64 \
 -DLLVM_BUILD_LLVM_DYLIB=ON \
 -DLLVM_LINK_LLVM_DYLIB=ON \
 /path/to/llvm/src/dir/
+`
 
-2. Build Gold plugin
-with this option:
--DLLVM_BINUTILS_INCDIR=/path/to/llvm/binutils/binutils/include/ \
+2. Build Gold plugin with this option:
+
+`-DLLVM_BINUTILS_INCDIR=/path/to/llvm/binutils/binutils/include/ \`
 
 Reference: https://llvm.org/docs/GoldPlugin.html
 
