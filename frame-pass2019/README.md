@@ -1,4 +1,4 @@
-# spaceMIU: A Run-time Type Confusion Checker for C/C++
+# SpaceMIU: A Run-time Type Confusion Checker for C/C++
 
 > FRAMER: A Tagged-pointer Capability Model
  
