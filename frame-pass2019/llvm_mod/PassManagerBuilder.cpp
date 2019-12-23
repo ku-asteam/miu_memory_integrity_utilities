@@ -739,7 +739,6 @@ void PassManagerBuilder::addLTOOptimizationPasses(legacy::PassManagerBase &PM) {
     // pointers passed as arguments to direct uses of functions.
   }
 
-/*
   // Infer attributes about definitions. The readnone attribute in particular is
   // required for virtual constant propagation.
   PM.add(createPostOrderFunctionAttrsLegacyPass());
@@ -757,6 +756,7 @@ void PassManagerBuilder::addLTOOptimizationPasses(legacy::PassManagerBase &PM) {
   if (OptLevel == 1)
     return;
   
+/*
   //
   // Now that we internalized some globals, see if we can hack on them!
   PM.add(createGlobalOptimizerPass());
