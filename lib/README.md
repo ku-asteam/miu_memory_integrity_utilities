@@ -1,29 +1,23 @@
-# SpaceMIU: A Run-time Type Confusion Checker for C/C++
+# Static/dynlib for Run-time Memory/type Safety
 
 > FRAMER: A Tagged-pointer Capability Model
  
 aSTEAM Project https://asteam.korea.ac.kr
 
-SpaceMIU is a run-time typecast checker for C (this will be extended
-to C++). The majority of typecasts in C/C++ programs are either
-upcasts (conversion from a descendant type to its ancestor type) or
-downcasts (in the opposite direction). This run-time type confusion
-checker implements physical sub-typing for C and pointer-to-type
-mapping, and detects unsafe downcasts at run-time using FRAMER’s 
-per-object metadata storage and two type descriptors - 
-a type layout table and type relation table.
+This includes hook functions for memory/type safety using 
+runtime checks.
 
-There are three main parts to our implementation: 
+There are three main parts to MIU implementation: 
 LLVM passes (/miu_memory_integrity_utilities/frame-pass2019/), 
 and the static library (lib), and the binary lib in this directory. 
 The target C source code and our hooks’ functions in the static lib 
 are first compiled to LLVM intermediate representation (IR). 
 Our main transformation pass (/miu_memory_integrity_utilities/frame-pass2019/transformation)
 instruments memory allocation/release, access, 
-or type cast in the target code in IR. 
+pointer arithmetic, or type cast in the target code in IR. 
 The third part is wrappers around malloc family routines and string functions. 
-Currently malloc,realloc,calloc,free (defined in mallocfamily.c) are 
-interposed at compiler time,
+Currently malloc, realloc, calloc, free (defined in mallocfamily.c) 
+are interposed at compiler time,
 but interposition at link-time is also possible 
 (see wrappers_version2.c and lntpreprocess.sh).
 
