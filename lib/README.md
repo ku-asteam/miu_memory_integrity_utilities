@@ -1,4 +1,4 @@
-# Static/dynlib for Run-time Memory/type Safety
+# Static/Dynamic Library for Run-time Memory/Type Safety
 
 > FRAMER: A Tagged-pointer Capability Model
  
